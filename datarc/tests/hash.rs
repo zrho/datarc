@@ -61,6 +61,8 @@ struct Record<'a> {
     values: &'a [i32],
 }
 
+/// Checks that constructors and view conversions cache the borrowed view hash computed
+/// with DefaultHasher, including empty slices.
 #[test]
 fn default_hasher_matches_borrowed_view_for_constructors_and_conversions() {
     let id = 42;
@@ -71,10 +73,10 @@ fn default_hasher_matches_borrowed_view_for_constructors_and_conversions() {
     };
     let expected = hash_with::<DefaultHasher>(&view);
     let owners = [
-        RecordArc::new(id, values),
-        RecordArc::try_new(id, values).unwrap(),
-        RecordArc::from(&view),
-        RecordArc::from(view),
+        RecordPacked::new(id, values),
+        RecordPacked::try_new(id, values).unwrap(),
+        RecordPacked::from(&view),
+        RecordPacked::from(view),
     ];
     for owner in owners {
         let cached: u64 = owner.cached_hash();
@@ -83,7 +85,7 @@ fn default_hasher_matches_borrowed_view_for_constructors_and_conversions() {
         assert_eq!(owner.clone().cached_hash(), expected);
         assert_eq!(std::mem::size_of_val(&owner), std::mem::size_of::<usize>());
     }
-    let empty = RecordArc::new(0, []);
+    let empty = RecordPacked::new(0, []);
     assert_eq!(
         empty.cached_hash(),
         hash_with::<DefaultHasher>(&Record::from(&empty))
@@ -131,6 +133,8 @@ impl Hash for Manual<'_> {
     }
 }
 
+/// Checks that a manual view hash and custom hasher run once per allocation, and owner
+/// hashing uses only the cached value.
 #[test]
 fn custom_manual_hash_runs_once_per_allocation_and_never_on_clone_or_access() {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -146,13 +150,13 @@ fn custom_manual_hash_runs_once_per_allocation_and_never_on_clone_or_access() {
     let expected = hash_with::<CustomHasher>(&view);
     calls.store(0, Ordering::SeqCst);
 
-    let first = ManualArc::new(payload.clone(), values);
+    let first = ManualPacked::new(payload.clone(), values);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let second = ManualArc::try_new(payload.clone(), values).unwrap();
+    let second = ManualPacked::try_new(payload.clone(), values).unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 2);
-    let third = ManualArc::from(&view);
+    let third = ManualPacked::from(&view);
     assert_eq!(calls.load(Ordering::SeqCst), 3);
-    let fourth = ManualArc::from(view);
+    let fourth = ManualPacked::from(view);
     assert_eq!(calls.load(Ordering::SeqCst), 4);
 
     for owner in [first, second, third, fourth] {
@@ -178,6 +182,8 @@ fn custom_manual_hash_runs_once_per_allocation_and_never_on_clone_or_access() {
     assert_eq!(calls.load(Ordering::SeqCst), 4);
 }
 
+/// Checks that static construction computes the hash once and immortal owner clones
+/// reuse the cached value.
 #[test]
 fn static_construction_hashes_once_and_static_clones_preserve_cache() {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -193,7 +199,7 @@ fn static_construction_hashes_once_and_static_clones_preserve_cache() {
     // SAFETY: the callback supplies fresh aligned storage which is deliberately
     // retained for the rest of the process, as required by new_static.
     let owner =
-        unsafe { ManualArc::new_static(|layout| std::alloc::alloc(layout), payload, [2, 4]) };
+        unsafe { ManualPacked::new_static(|layout| std::alloc::alloc(layout), payload, [2, 4]) };
     let shared = owner.clone();
     assert_eq!(owner.cached_hash(), expected);
     assert_eq!(shared.cached_hash(), expected);
@@ -258,7 +264,7 @@ fn check_hash_panic_cleanup(static_storage: bool, fallible: bool) {
             // SAFETY: the callback supplies fresh aligned storage. On failure,
             // the caller retains this storage and frees it after all cleanup.
             unsafe {
-                PanickingHashArc::new_static(
+                PanickingHashPacked::new_static(
                     |layout| {
                         WATCH_NEXT_ALLOCATION.with(|watch| watch.set(true));
                         let ptr = std::alloc::alloc(layout);
@@ -273,9 +279,9 @@ fn check_hash_panic_cleanup(static_storage: bool, fallible: bool) {
         } else {
             WATCH_NEXT_ALLOCATION.with(|watch| watch.set(true));
             if fallible {
-                let _ = PanickingHashArc::try_new(fixed, first, second);
+                let _ = PanickingHashPacked::try_new(fixed, first, second);
             } else {
-                let _ = PanickingHashArc::new(fixed, first, second);
+                let _ = PanickingHashPacked::new(fixed, first, second);
             }
         }
     }));
@@ -305,12 +311,16 @@ fn check_hash_panic_cleanup(static_storage: bool, fallible: bool) {
     WATCHED_ALLOCATION.with(|watched| watched.set(std::ptr::null_mut()));
 }
 
+/// Checks that a view-hashing panic in new or try_new drops all initialized values and
+/// frees the ordinary allocation.
 #[test]
 fn hashing_panic_drops_fields_and_tails_and_frees_normal_allocation() {
     check_hash_panic_cleanup(false, false);
     check_hash_panic_cleanup(false, true);
 }
 
+/// Checks that a view-hashing panic drops all initialized values but leaves
+/// caller-provided static storage for the caller to free.
 #[test]
 fn hashing_panic_drops_fields_and_tails_without_freeing_static_allocation() {
     check_hash_panic_cleanup(true, false);
@@ -324,16 +334,18 @@ struct Generic<'a, 'data, T: Hash, const N: usize> {
     values: &'a [T],
 }
 
+/// Checks cached hashing for records combining type and const generics, borrowed
+/// payloads, fixed arrays, and empty slices.
 #[test]
 fn cached_hash_preserves_type_const_and_payload_lifetime_generics() {
     let text = String::from("borrowed payload");
-    let owner = GenericArc::<u16, 3>::new(text.as_str(), [1, 2, 3], [5, 8]);
+    let owner = GenericPacked::<u16, 3>::new(text.as_str(), [1, 2, 3], [5, 8]);
     let expected = hash_with::<DefaultHasher>(&Generic::from(&owner));
     assert_eq!(owner.cached_hash(), expected);
     let shared = owner.clone();
     assert_eq!(shared.cached_hash(), expected);
     assert_eq!(*Generic::from(&shared).label, text.as_str());
-    let empty = GenericArc::<u8, 0>::try_new(text.as_str(), [], []).unwrap();
+    let empty = GenericPacked::<u8, 0>::try_new(text.as_str(), [], []).unwrap();
     assert_eq!(
         empty.cached_hash(),
         hash_with::<DefaultHasher>(&Generic::from(&empty))

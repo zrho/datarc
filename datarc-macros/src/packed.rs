@@ -226,6 +226,8 @@ pub(super) fn expand(item: ItemEnum) -> syn::Result<TokenStream> {
 mod tests {
     use super::*;
 
+    /// Checks that enum expansion rejects unsupported variant shapes, Self payloads,
+    /// conditional variants, name collisions, and more than 16 variants.
     #[test]
     fn rejects_unsupported_enums() {
         for input in [

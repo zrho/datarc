@@ -21,6 +21,8 @@ pub struct MixedView<'view> {
     pub words: &'view [String],
 }
 
+/// Checks that a record and its Option are pointer-sized, independently sized arrays
+/// share one aligned allocation, and clones share storage.
 #[test]
 fn thin_handle_and_independent_inline_arrays() {
     let value = Mixed::new(
@@ -63,6 +65,7 @@ fn thin_handle_and_independent_inline_arrays() {
     assert_eq!(shared.words(), &["word"]);
 }
 
+/// Checks that empty inline arrays expose empty slices with correctly aligned pointers.
 #[test]
 fn empty_arrays_are_aligned() {
     let value = Mixed::new(0, vec![], String::new(), vec![], vec![]);
@@ -86,6 +89,8 @@ struct ArithmeticView<'view, T, U, V> {
 #[repr(align(256))]
 struct AlignedZst;
 
+/// Checks accessor addresses and lengths against Layout::extend across varied array
+/// sizes, alignment padding, and zero-sized elements.
 #[test]
 fn accessor_offsets_match_checked_layout_across_padding_and_zero_sized_arrays() {
     use std::alloc::Layout;
@@ -154,6 +159,8 @@ where
     array: &'view [u8; N],
 }
 
+/// Checks that owners preserve type and const generics and borrowed payload lifetimes
+/// while sharing non-Clone elements.
 #[test]
 fn generics_lifetimes_and_non_clone_elements() {
     struct NotClone(i32);
@@ -179,6 +186,8 @@ struct SliceSyntaxView<'view, 'a, const N: usize> {
     parenthesized: (&'view [u16]),
 }
 
+/// Checks that slice parsing distinguishes inline arrays from fixed arrays and borrowed
+/// slices, including parenthesized types.
 #[test]
 fn slice_syntax_distinguishes_fixed_arrays_references_and_element_types() {
     let borrowed = [9, 8];
@@ -215,6 +224,8 @@ macro_rules! forwarded_record {
 
 forwarded_record!(ForwardedSliceView, ForwardedSlice, [u16]);
 
+/// Checks that slice types passed through a macro_rules type fragment are recognized as
+/// inline arrays.
 #[test]
 fn slice_types_forwarded_through_macro_rules_are_recognized() {
     assert_eq!(ForwardedSlice::new(vec![1, 2]).values(), &[1, 2]);
@@ -230,6 +241,8 @@ struct FixedView<'view> {
 #[datarc(owned = Empty)]
 struct EmptyView {}
 
+/// Checks construction and cloning for records with only fixed fields or no fields,
+/// including pointer-sized empty owners.
 #[test]
 fn fixed_only_and_empty_records() {
     assert_eq!(Fixed::new("fixed".into()).clone().value(), "fixed");
@@ -266,6 +279,8 @@ fn tracked(count: &Arc<AtomicUsize>, panic: bool) -> Tracked {
     }
 }
 
+/// Checks that fixed fields and array elements remain alive while shared and are each
+/// dropped once by the last owner.
 #[test]
 fn drops_exactly_once_after_last_owner() {
     let count = Arc::new(AtomicUsize::new(0));
@@ -281,6 +296,8 @@ fn drops_exactly_once_after_last_owner() {
     assert_eq!(count.load(Ordering::Relaxed), 4);
 }
 
+/// Checks that a panicking array element destructor does not prevent other elements,
+/// later arrays, or fixed fields from being dropped.
 #[test]
 fn unwinding_tail_drops_other_elements_tails_and_header() {
     let count = Arc::new(AtomicUsize::new(0));
@@ -294,6 +311,8 @@ fn unwinding_tail_drops_other_elements_tails_and_header() {
     assert_eq!(Arc::strong_count(&count), 1);
 }
 
+/// Checks that a panicking fixed-field destructor still allows every array element to
+/// be dropped.
 #[test]
 fn unwinding_header_still_frees_all_values() {
     let count = Arc::new(AtomicUsize::new(0));
@@ -307,6 +326,8 @@ fn unwinding_header_still_frees_all_values() {
     assert_eq!(Arc::strong_count(&count), 1);
 }
 
+/// Checks that length overflow identifies the field, length, and storage type and drops
+/// all consumed inputs.
 #[test]
 fn length_overflow_drops_inputs_and_reports_field() {
     let count = Arc::new(AtomicUsize::new(0));
@@ -326,6 +347,8 @@ fn length_overflow_drops_inputs_and_reports_field() {
     assert_eq!(count.load(Ordering::Relaxed), 258);
 }
 
+/// Checks that a u8 length accepts 255 elements and rejects 256 through the panicking
+/// constructor.
 #[test]
 fn compact_lengths_accept_their_maximum() {
     let value = Mixed::try_new(0, vec![1; 255], String::new(), vec![], vec![]).unwrap();
@@ -357,6 +380,8 @@ struct ZeroSizedView<'view> {
     empty: &'view [Zst],
 }
 
+/// Checks alignment for populated and empty slices of zero-sized elements and verifies
+/// one destructor call per stored element.
 #[test]
 fn aligned_zero_sized_elements_are_dropped() {
     let before = ZST_DROPS.load(Ordering::Relaxed);
@@ -376,6 +401,8 @@ struct ConcurrentView<'view> {
     items: &'view [Tracked],
 }
 
+/// Checks Send and Sync support, concurrent owner cloning and access, and exactly one
+/// payload drop after all threads finish.
 #[test]
 fn concurrent_clone_and_drop() {
     fn assert_send_sync<T: Send + Sync>() {}
@@ -413,6 +440,7 @@ struct RecursiveView<'view> {
     children: &'view [Recursive],
 }
 
+/// Checks that a record can own an inline array of owners of the same record type.
 #[test]
 fn recursive_records() {
     let tree = Recursive::new(vec![Recursive::new(vec![])]);
@@ -427,6 +455,8 @@ struct NamesView<'view> {
     r#type: &'view bool,
 }
 
+/// Checks that raw identifiers and field names resembling generated internals receive
+/// working accessors without collisions.
 #[test]
 fn raw_identifiers_and_internal_looking_names() {
     let names = Names::new(5, vec![3], true);

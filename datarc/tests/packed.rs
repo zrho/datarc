@@ -23,10 +23,12 @@ struct Empty {}
 
 #[derive(Packable)]
 enum Value {
-    Record(RecordArc),
-    Empty(EmptyArc),
+    Record(RecordPacked),
+    Empty(EmptyPacked),
 }
 
+/// Checks pointer-sized packed enums and their Options, shared payload addresses,
+/// conversion round trips, and destruction after the last owner.
 #[test]
 fn packed_ownership_and_borrowing() {
     assert_eq!(
@@ -38,7 +40,7 @@ fn packed_ownership_and_borrowing() {
         std::mem::size_of::<usize>()
     );
     let drops = Arc::new(AtomicUsize::new(0));
-    let record = RecordArc::new(Counted(drops.clone()), [1, 2, 3]);
+    let record = RecordPacked::new(Counted(drops.clone()), [1, 2, 3]);
     let original_address = record.bytes().as_ptr();
     let packed: <Value as Packable>::Packed = Value::Record(record).into();
     packed.with_enum(|value| match value {
@@ -60,7 +62,7 @@ fn packed_ownership_and_borrowing() {
     assert_eq!(drops.load(Ordering::Relaxed), 0);
     drop(ordinary);
     assert_eq!(drops.load(Ordering::Relaxed), 1);
-    let empty = ValuePacked::from(Value::Empty(EmptyArc::new()));
+    let empty = ValuePacked::from(Value::Empty(EmptyPacked::new()));
     assert!(matches!(empty.clone().into_enum(), Value::Empty(_)));
     assert!(matches!(empty.into_enum(), Value::Empty(_)));
 }
@@ -77,16 +79,18 @@ enum Generic<'data, T, const N: usize = 2>
 where
     T: std::fmt::Debug,
 {
-    First(BorrowedArc<'data, T, N>),
-    Second(BorrowedArc<'data, T, N>),
+    First(BorrowedPacked<'data, T, N>),
+    Second(BorrowedPacked<'data, T, N>),
 }
 
+/// Checks that packed enums preserve borrowed payloads and type and const generics, and
+/// implement Send and Sync for suitable payloads.
 #[test]
 fn generic_borrowed_payloads_and_threads() {
     fn send_sync<T: Send + Sync>() {}
     send_sync::<GenericPacked<'static, u32>>();
     let text = String::from("borrowed");
-    let packed = GenericPacked::from(Generic::Second(BorrowedArc::new(
+    let packed = GenericPacked::from(Generic::Second(BorrowedPacked::new(
         text.as_str(),
         42u32,
         [1, 2],
@@ -100,27 +104,29 @@ fn generic_borrowed_payloads_and_threads() {
 
 #[derive(Packable)]
 enum Sixteen {
-    V0(EmptyArc),
-    V1(EmptyArc),
-    V2(EmptyArc),
-    V3(EmptyArc),
-    V4(EmptyArc),
-    V5(EmptyArc),
-    V6(EmptyArc),
-    V7(EmptyArc),
-    V8(EmptyArc),
-    V9(EmptyArc),
-    V10(EmptyArc),
-    V11(EmptyArc),
-    V12(EmptyArc),
-    V13(EmptyArc),
-    V14(EmptyArc),
-    V15(EmptyArc),
+    V0(EmptyPacked),
+    V1(EmptyPacked),
+    V2(EmptyPacked),
+    V3(EmptyPacked),
+    V4(EmptyPacked),
+    V5(EmptyPacked),
+    V6(EmptyPacked),
+    V7(EmptyPacked),
+    V8(EmptyPacked),
+    V9(EmptyPacked),
+    V10(EmptyPacked),
+    V11(EmptyPacked),
+    V12(EmptyPacked),
+    V13(EmptyPacked),
+    V14(EmptyPacked),
+    V15(EmptyPacked),
 }
 
+/// Checks that all 16 variant tags survive packed enum cloning and conversion back to
+/// the original enum.
 #[test]
 fn all_four_tag_bits() {
-    let constructors: [fn(EmptyArc) -> Sixteen; 16] = [
+    let constructors: [fn(EmptyPacked) -> Sixteen; 16] = [
         Sixteen::V0,
         Sixteen::V1,
         Sixteen::V2,
@@ -139,7 +145,7 @@ fn all_four_tag_bits() {
         Sixteen::V15,
     ];
     for constructor in constructors {
-        let original = constructor(EmptyArc::new());
+        let original = constructor(EmptyPacked::new());
         let discriminant = std::mem::discriminant(&original);
         let packed = SixteenPacked::from(original);
         assert_eq!(
@@ -157,24 +163,28 @@ struct HighAlign<'a> {
     value: &'a Aligned,
 }
 
+/// Checks the minimum 16-byte pointer alignment, stronger payload alignment, and
+/// ownership restoration through PackedPointer.
 #[test]
 fn alignment_and_raw_ownership_roundtrip() {
-    let ptr = EmptyArc::new().into_raw();
+    let ptr = EmptyPacked::new().into_raw();
     assert_eq!(ptr.addr().get() % 16, 0);
     // SAFETY: restore the unit transferred above, exactly once.
-    drop(unsafe { EmptyArc::from_raw(ptr) });
-    let ptr = HighAlignArc::new(Aligned).into_raw();
+    drop(unsafe { EmptyPacked::from_raw(ptr) });
+    let ptr = HighAlignPacked::new(Aligned).into_raw();
     assert_eq!(ptr.addr().get() % 64, 0);
     // SAFETY: restore the unit transferred above, exactly once.
-    drop(unsafe { HighAlignArc::from_raw(ptr) });
+    drop(unsafe { HighAlignPacked::from_raw(ptr) });
 }
 
+/// Checks that packed static records request aligned storage and remain immortal even
+/// when borrowed inspection panics.
 #[test]
 fn static_owners_and_panicking_inspection() {
     let drops = Arc::new(AtomicUsize::new(0));
     // SAFETY: the global allocation is deliberately retained forever.
     let owner = unsafe {
-        RecordArc::new_static(
+        RecordPacked::new_static(
             |layout| {
                 assert!(layout.align() >= 16);
                 std::alloc::alloc(layout)
@@ -190,6 +200,8 @@ fn static_owners_and_panicking_inspection() {
     assert_eq!(drops.load(Ordering::Relaxed), 0);
 }
 
+/// Checks that generic Packable functions can pack and unpack enums using associated
+/// types and From bounds.
 #[test]
 fn enum_trait_supports_generic_conversion_roundtrips() {
     fn pack<E: Packable>(value: E) -> E::Packed
@@ -201,6 +213,6 @@ fn enum_trait_supports_generic_conversion_roundtrips() {
     fn unpack<E: Packable + From<E::Packed>>(packed: E::Packed) -> E {
         E::from(packed)
     }
-    let packed = pack(Value::Empty(EmptyArc::new()));
+    let packed = pack(Value::Empty(EmptyPacked::new()));
     assert!(matches!(unpack::<Value>(packed), Value::Empty(_)));
 }

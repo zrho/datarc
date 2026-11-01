@@ -45,6 +45,8 @@ struct RecordView<'view> {
     words: &'view [u64],
 }
 
+/// Checks that construction uses one allocation and releases input buffers, while
+/// clones share storage until the last owner drops.
 #[test]
 fn construction_allocates_once_clone_never_allocates_and_last_drop_frees() {
     let bytes = vec![1, 2];
@@ -75,6 +77,8 @@ fn construction_allocates_once_clone_never_allocates_and_last_drop_frees() {
     assert_eq!(DEALLOCATIONS.with(Cell::get), 1);
 }
 
+/// Checks that mapped iterators write directly into a single allocation without
+/// temporary buffers.
 #[test]
 fn direct_generation_uses_one_allocation_without_temporary_buffers() {
     COUNT.with(|b| b.set(true));
@@ -90,6 +94,8 @@ fn direct_generation_uses_one_allocation_without_temporary_buffers() {
     assert_eq!(DEALLOCATIONS.with(Cell::get), 1);
 }
 
+/// Checks that an iterator yielding fewer items than reported returns a length error
+/// and frees the partial allocation.
 #[test]
 fn count_mismatch_releases_the_partial_allocation() {
     struct WrongLength;
@@ -122,6 +128,8 @@ struct View<'a> {
     bytes: &'a [u8],
 }
 
+/// Checks that copying a view allocates once and all borrowed conversions reuse the
+/// same storage without further allocations.
 #[test]
 fn derived_view_cloning_allocates_once_and_borrowing_does_not_allocate() {
     let id = 7;
@@ -130,10 +138,10 @@ fn derived_view_cloning_allocates_once_and_borrowing_does_not_allocate() {
         bytes: &[1, 2, 3],
     };
     COUNT.with(|b| b.set(true));
-    let owner = ViewArc::from(&view);
+    let owner = ViewPacked::from(&view);
     let borrowed = View::from(&owner);
     let via_from: View<'_> = (&owner).into();
-    let via_trait = <View<'_> as From<&ViewArc>>::from(&owner);
+    let via_trait = <View<'_> as From<&ViewPacked>>::from(&owner);
     COUNT.with(|b| b.set(false));
     assert_eq!(*borrowed.id, 7);
     assert!(std::ptr::eq(borrowed.bytes, via_from.bytes));
@@ -151,6 +159,8 @@ enum PackedValue {
     Record(Record),
 }
 
+/// Checks that enum packing, inspection, cloning, and unpacking allocate nothing, and
+/// the final owner releases the record.
 #[test]
 fn packing_inspecting_cloning_and_unpacking_do_not_allocate() {
     let record = Record::new(7, [1, 2], [3, 4]);

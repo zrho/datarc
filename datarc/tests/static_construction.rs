@@ -63,6 +63,8 @@ struct Record<'a> {
     aligned: &'a [Aligned],
 }
 
+/// Checks that static and counted records use the same owner type, preserve alignment,
+/// and only counted records drop their contents.
 #[test]
 fn static_records_mix_with_counted_records_and_never_drop_their_contents() {
     static ARENA: Arena = Arena::new();
@@ -72,7 +74,7 @@ fn static_records_mix_with_counted_records_and_never_drop_their_contents() {
     let token = String::from("FnOnce allocator");
     // SAFETY: the arena supplies a unique properly aligned permanent region.
     let permanent = unsafe {
-        RecordArc::new_static(
+        RecordPacked::new_static(
             |layout| {
                 drop(token);
                 calls.set(calls.get() + 1);
@@ -99,8 +101,8 @@ fn static_records_mix_with_counted_records_and_never_drop_their_contents() {
     for _ in 0..32 {
         drop(permanent.clone());
     }
-    let ordinary = RecordArc::new(Probe(&NORMAL_DROPS), [Probe(&NORMAL_DROPS)], []);
-    let mixed: [RecordArc; 2] = [ordinary, permanent.clone()];
+    let ordinary = RecordPacked::new(Probe(&NORMAL_DROPS), [Probe(&NORMAL_DROPS)], []);
+    let mixed: [RecordPacked; 2] = [ordinary, permanent.clone()];
     drop(mixed);
     assert_eq!(NORMAL_DROPS.load(Ordering::Relaxed), 2);
     drop(permanent);
@@ -109,13 +111,15 @@ fn static_records_mix_with_counted_records_and_never_drop_their_contents() {
     assert_eq!(unsafe { ARENA.count() }, usize::MAX);
 }
 
+/// Checks that concurrent cloning and dropping of static owners leaves the immortal
+/// reference-count sentinel unchanged and drops no payloads.
 #[test]
 fn concurrent_static_clones_and_drops_leave_the_sentinel_unchanged() {
     static ARENA: Arena = Arena::new();
     static DROPS: AtomicUsize = AtomicUsize::new(0);
     // SAFETY: this arena is used exactly once and lives for the whole process.
     let owner =
-        unsafe { RecordArc::new_static(|layout| ARENA.allocate(layout), Probe(&DROPS), [], []) };
+        unsafe { RecordPacked::new_static(|layout| ARENA.allocate(layout), Probe(&DROPS), [], []) };
     std::thread::scope(|scope| {
         for _ in 0..4 {
             scope.spawn(|| {
@@ -164,6 +168,8 @@ impl<I> Drop for DropPanic<I> {
     }
 }
 
+/// Checks that length errors and iterator panics clean up initialized static-record
+/// values while retaining the supplied storage.
 #[test]
 fn failed_initialization_drops_values_without_deallocating_static_storage() {
     static ARENAS: [Arena; 3] = [Arena::new(), Arena::new(), Arena::new()];
@@ -174,13 +180,13 @@ fn failed_initialization_drops_values_without_deallocating_static_storage() {
             // SAFETY: each case claims its own permanent, aligned arena once.
             unsafe {
                 match case {
-                    0 => RecordArc::new_static(
+                    0 => RecordPacked::new_static(
                         |layout| arena.allocate(layout),
                         Probe(&DROPS),
                         Short([Probe(&DROPS), Probe(&DROPS)].into_iter()),
                         [],
                     ),
-                    1 => RecordArc::new_static(
+                    1 => RecordPacked::new_static(
                         |layout| arena.allocate(layout),
                         Probe(&DROPS),
                         (0..3).map(|i| {
@@ -189,7 +195,7 @@ fn failed_initialization_drops_values_without_deallocating_static_storage() {
                         }),
                         [],
                     ),
-                    _ => RecordArc::new_static(
+                    _ => RecordPacked::new_static(
                         |layout| arena.allocate(layout),
                         Probe(&DROPS),
                         DropPanic([Probe(&DROPS), Probe(&DROPS)].into_iter()),
@@ -204,6 +210,8 @@ fn failed_initialization_drops_values_without_deallocating_static_storage() {
     }
 }
 
+/// Checks that an overflowing static-record length rejects construction before calling
+/// the allocator and drops all inputs.
 #[test]
 fn lengths_are_validated_before_calling_the_allocator() {
     static DROPS: AtomicUsize = AtomicUsize::new(0);
@@ -212,7 +220,7 @@ fn lengths_are_validated_before_calling_the_allocator() {
         // SAFETY: the allocator never returns a region; validation must reject
         // the oversized field before calling it.
         unsafe {
-            RecordArc::new_static(
+            RecordPacked::new_static(
                 |_| {
                     called.set(true);
                     panic!("allocator must not be called")
@@ -236,15 +244,17 @@ struct Fixed<'a> {
 #[derive(Packable)]
 struct Empty {}
 
+/// Checks static construction and field access for fixed-only records and construction
+/// of empty records in separate permanent regions.
 #[test]
 fn fixed_only_and_empty_records_support_static_allocation() {
     static FIXED: Arena = Arena::new();
     static EMPTY: Arena = Arena::new();
     // SAFETY: both arenas provide independent permanent regions exactly once.
-    let fixed = unsafe { FixedArc::new_static(|layout| FIXED.allocate(layout), 9) };
+    let fixed = unsafe { FixedPacked::new_static(|layout| FIXED.allocate(layout), 9) };
     assert_eq!(*fixed.value(), 9);
     // SAFETY: EMPTY is independent of FIXED and has not been claimed.
-    let empty = unsafe { EmptyArc::new_static(|layout| EMPTY.allocate(layout)) };
+    let empty = unsafe { EmptyPacked::new_static(|layout| EMPTY.allocate(layout)) };
     drop((fixed, empty));
 }
 
@@ -257,6 +267,8 @@ struct Generic<'view, 'data, T, const N: usize> {
     __datarc_construct: &'view u8,
 }
 
+/// Checks static construction with type and const generics, borrowed payloads, and
+/// field names resembling generated constructor internals.
 #[test]
 fn generics_payload_lifetimes_and_internal_looking_names_work() {
     static ARENA: Arena = Arena::new();
@@ -265,7 +277,7 @@ fn generics_payload_lifetimes_and_internal_looking_names_work() {
     // SAFETY: the allocation is permanent; the owner retains the source's
     // payload lifetime, so source data is borrowed only while it is live.
     let owner = unsafe {
-        GenericArc::new_static(
+        GenericPacked::new_static(
             |layout| ARENA.allocate(layout),
             &source,
             [Probe(&DROPS)],

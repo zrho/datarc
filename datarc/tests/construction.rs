@@ -53,6 +53,8 @@ impl<I: Iterator> ExactSizeIterator for Reported<I> {
     }
 }
 
+/// Checks that arrays, vectors, and mapped iterators move non-Clone values into records
+/// and drop each value once.
 #[test]
 fn arrays_vectors_and_mapped_iterators_move_non_clone_values() {
     let drops = Arc::new(AtomicUsize::new(0));
@@ -77,6 +79,8 @@ struct NumbersView<'view> {
     names: &'view [String],
 }
 
+/// Checks construction from ranges, empty iterators, and borrowed slices whose elements
+/// are explicitly cloned.
 #[test]
 fn ranges_empty_iterators_and_explicitly_cloned_slices() {
     let names = [String::from("first"), String::from("second")];
@@ -88,6 +92,8 @@ fn ranges_empty_iterators_and_explicitly_cloned_slices() {
     assert!(empty.names().is_empty());
 }
 
+/// Checks that short or excess input in either array reports the offending field and
+/// drops every input and initialized value.
 #[test]
 fn incorrect_lengths_in_any_array_drop_all_inputs_and_initialized_values() {
     for (field, reported, actual) in [
@@ -134,6 +140,8 @@ fn incorrect_lengths_in_any_array_drop_all_inputs_and_initialized_values() {
     }
 }
 
+/// Checks that length validation requests only one excess item from an infinite
+/// iterator and cleans up all generated values.
 #[test]
 fn excess_items_are_bounded_even_for_an_infinite_iterator() {
     let drops = Arc::new(AtomicUsize::new(0));
@@ -157,6 +165,8 @@ fn excess_items_are_bounded_even_for_an_infinite_iterator() {
     assert_eq!(Arc::strong_count(&drops), 1);
 }
 
+/// Checks that the infallible constructor panics on an iterator length mismatch after
+/// dropping all values.
 #[test]
 fn new_panics_on_length_mismatch_after_cleanup() {
     let drops = Arc::new(AtomicUsize::new(0));
@@ -175,6 +185,8 @@ fn new_panics_on_length_mismatch_after_cleanup() {
     assert_eq!(Arc::strong_count(&drops), 1);
 }
 
+/// Checks that an iterator panic drops completed arrays, the partially initialized
+/// array, and fixed fields.
 #[test]
 fn iterator_panic_drops_earlier_arrays_current_prefix_and_header() {
     let drops = Arc::new(AtomicUsize::new(0));
@@ -214,6 +226,8 @@ impl<I> Drop for DropPanic<I> {
     }
 }
 
+/// Checks that a panic when dropping an exhausted iterator still cleans up every
+/// initialized field and element.
 #[test]
 fn iterator_destructor_panic_keeps_all_initialization_guards_active() {
     let drops = Arc::new(AtomicUsize::new(0));
@@ -252,6 +266,8 @@ impl<T> IntoIterator for IntoIterPanic<T> {
     }
 }
 
+/// Checks that panics in into_iter or len drop all constructor inputs before record
+/// allocation.
 #[test]
 fn panics_before_allocation_drop_every_input() {
     for panic_in_len in [false, true] {
@@ -277,6 +293,8 @@ fn panics_before_allocation_drop_every_input() {
     }
 }
 
+/// Checks that a destructor panic during length-error cleanup still drops the remaining
+/// fields and elements.
 #[test]
 fn destructor_panic_during_failed_initialization_still_cleans_other_fields() {
     let drops = Arc::new(AtomicUsize::new(0));
@@ -301,6 +319,8 @@ fn destructor_panic_during_failed_initialization_still_cleans_other_fields() {
     assert_eq!(Arc::strong_count(&drops), 1);
 }
 
+/// Checks that a length exceeding u8 storage is rejected before generating elements and
+/// that other inputs are dropped.
 #[test]
 fn compact_length_overflow_is_checked_before_generating_elements() {
     let drops = Arc::new(AtomicUsize::new(0));
@@ -328,6 +348,8 @@ struct ZeroSizedView<'view> {
     values: &'view [()],
 }
 
+/// Checks that zero-sized elements still require accurate iterator lengths, including a
+/// reported length of usize::MAX.
 #[test]
 fn zero_sized_arrays_validate_actual_counts_even_with_maximum_reported_length() {
     for reported in [0, 3, usize::MAX] {

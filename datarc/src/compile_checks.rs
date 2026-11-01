@@ -4,7 +4,7 @@
 //! #[derive(Packable)]
 //! struct Record<'a> { value: &'a std::rc::Rc<u8> }
 //! fn require_send<T: Send>() {}
-//! require_send::<RecordArc>();
+//! require_send::<RecordPacked>();
 //! ```
 //!
 //! Non-Send types in arrays cannot cross threads either.
@@ -13,7 +13,7 @@
 //! #[derive(Packable)]
 //! struct Record<'a> { values: &'a [std::rc::Rc<u8>] }
 //! fn require_send<T: Send>() {}
-//! require_send::<RecordArc>();
+//! require_send::<RecordPacked>();
 //! ```
 //!
 //! Array elements must also be Sync for the shared handle to be Send.
@@ -22,7 +22,7 @@
 //! #[derive(Packable)]
 //! struct Record<'a> { values: &'a [std::cell::Cell<u8>] }
 //! fn require_send<T: Send>() {}
-//! require_send::<RecordArc>();
+//! require_send::<RecordPacked>();
 //! ```
 //!
 //! Shared handles containing non-Sync elements cannot be shared by reference.
@@ -31,7 +31,7 @@
 //! #[derive(Packable)]
 //! struct Record<'a> { values: &'a [std::cell::Cell<u8>] }
 //! fn require_sync<T: Sync>() {}
-//! require_sync::<RecordArc>();
+//! require_sync::<RecordPacked>();
 //! ```
 //!
 //! An accessor cannot outlive its handle.
@@ -39,7 +39,7 @@
 //! use datarc::Packable;
 //! #[derive(Packable)]
 //! struct Record<'a> { values: &'a [u8] }
-//! let values = { let record = RecordArc::new(vec![1]); record.values() };
+//! let values = { let record = RecordPacked::new(vec![1]); record.values() };
 //! assert_eq!(values, &[1]);
 //! ```
 //!
@@ -48,7 +48,7 @@
 //! use datarc::Packable;
 //! #[derive(Packable)]
 //! struct Record<'view, 'data> { values: &'view [&'data str] }
-//! let record = { let text = String::from("hello"); RecordArc::new(vec![text.as_str()]) };
+//! let record = { let text = String::from("hello"); RecordPacked::new(vec![text.as_str()]) };
 //! assert_eq!(record.values(), &["hello"]);
 //! ```
 //!
@@ -60,7 +60,7 @@
 //!     #[derive(Packable)]
 //!     pub struct Record<'a> { value: &'a u8 }
 //! }
-//! let record = inner::RecordArc::new(1);
+//! let record = inner::RecordPacked::new(1);
 //! let _ = record.value();
 //! ```
 //!
@@ -69,7 +69,7 @@
 //! use datarc::Packable;
 //! #[derive(Packable)]
 //! struct Record<'a> { values: &'a [u8] }
-//! let _ = RecordArc::new((0..10).filter(|n| n % 2 == 0));
+//! let _ = RecordPacked::new((0..10).filter(|n| n % 2 == 0));
 //! ```
 //!
 //! The derive preserves ownership and borrowing for non-Clone data, but it does
@@ -80,7 +80,7 @@
 //! #[derive(Packable)]
 //! struct View<'a> { value: &'a NotClone }
 //! let value = NotClone;
-//! let _ = ViewArc::from(View { value: &value });
+//! let _ = ViewPacked::from(View { value: &value });
 //! ```
 //!
 //! Slice elements must also be Clone to copy a view into an owner.
@@ -90,7 +90,7 @@
 //! #[derive(Packable)]
 //! struct View<'a> { values: &'a [NotClone] }
 //! let values = [NotClone];
-//! let _ = ViewArc::from(&View { values: &values });
+//! let _ = ViewPacked::from(&View { values: &values });
 //! ```
 //!
 //! A derived borrowed view cannot outlive the owner that lends its references.
@@ -98,7 +98,7 @@
 //! use datarc::Packable;
 //! #[derive(Packable)]
 //! struct View<'a> { values: &'a [u32] }
-//! let view = { let owner = ViewArc::new([1, 2]); View::from(&owner) };
+//! let view = { let owner = ViewPacked::new([1, 2]); View::from(&owner) };
 //! assert_eq!(view.values, &[1, 2]);
 //! ```
 //!
@@ -107,7 +107,7 @@
 //! use datarc::Packable;
 //! #[derive(Packable)]
 //! struct View<'view, 'data> { text: &'view &'data str }
-//! let owner = { let text = String::from("payload"); ViewArc::new(text.as_str()) };
+//! let owner = { let text = String::from("payload"); ViewPacked::new(text.as_str()) };
 //! assert_eq!(*View::from(&owner).text, "payload");
 //! ```
 //!
@@ -116,7 +116,7 @@
 //! use datarc::Packable;
 //! #[derive(Packable)]
 //! struct View<'a> { value: &'a u32 }
-//! let _ = ViewArc::new_static(|_| std::ptr::null_mut(), 1);
+//! let _ = ViewPacked::new_static(|_| std::ptr::null_mut(), 1);
 //! ```
 //!
 //! Permanent storage does not extend lifetimes of borrowed payloads.
@@ -126,7 +126,7 @@
 //! struct View<'view, 'data> { text: &'view &'data str }
 //! let owner = {
 //!     let text = String::from("payload");
-//!     unsafe { ViewArc::new_static(|layout| std::alloc::alloc(layout), text.as_str()) }
+//!     unsafe { ViewPacked::new_static(|layout| std::alloc::alloc(layout), text.as_str()) }
 //! };
 //! assert_eq!(*View::from(&owner).text, "payload");
 //! ```
@@ -138,7 +138,7 @@
 //! #[derive(Packable)]
 //! struct Record<'a> { value: &'a std::rc::Rc<u8> }
 //! #[derive(Packable)]
-//! enum Value { Record(RecordArc) }
+//! enum Value { Record(RecordPacked) }
 //! fn send<T: Send>() {}
 //! send::<ValuePacked>();
 //! ```
@@ -149,7 +149,7 @@
 //! #[derive(Packable)]
 //! struct Record<'a> { value: &'a std::cell::Cell<u8> }
 //! #[derive(Packable)]
-//! enum Value { Record(RecordArc) }
+//! enum Value { Record(RecordPacked) }
 //! fn sync<T: Sync>() {}
 //! sync::<ValuePacked>();
 //! ```
@@ -160,8 +160,8 @@
 //! #[derive(Packable)]
 //! struct Record<'a> { value: &'a u32 }
 //! #[derive(Packable)]
-//! enum Value { Record(RecordArc) }
-//! let packed = ValuePacked::from(Value::Record(RecordArc::new(1)));
+//! enum Value { Record(RecordPacked) }
+//! let packed = ValuePacked::from(Value::Record(RecordPacked::new(1)));
 //! let borrowed = packed.with_enum(|value| match value {
 //!     Value::Record(owner) => owner.value(),
 //! });
@@ -174,10 +174,10 @@
 //! #[derive(Packable)]
 //! struct Record<'v, 'data> { value: &'v &'data str }
 //! #[derive(Packable)]
-//! enum Value<'data> { Record(RecordArc<'data>) }
+//! enum Value<'data> { Record(RecordPacked<'data>) }
 //! let packed = {
 //!     let text = String::from("borrowed");
-//!     ValuePacked::from(Value::Record(RecordArc::new(text.as_str())))
+//!     ValuePacked::from(Value::Record(RecordPacked::new(text.as_str())))
 //! };
 //! drop(packed);
 //! ```
@@ -196,7 +196,7 @@
 //! #[derive(Packable)]
 //! #[datarc(hash)]
 //! struct View<'a> { value: &'a u32 }
-//! let _ = ViewArc::new(42);
+//! let _ = ViewPacked::new(42);
 //! ```
 //!
 //! A custom hasher must implement Hasher and Default.
@@ -207,7 +207,7 @@
 //! #[derive(Packable, Hash)]
 //! #[datarc(hash, hasher = NotAHasher)]
 //! struct View<'a> { value: &'a u32 }
-//! let _ = ViewArc::new(42);
+//! let _ = ViewPacked::new(42);
 //! ```
 //!
 //! Unions cannot derive Packable.

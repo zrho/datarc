@@ -179,7 +179,7 @@ pub(super) fn expand(item: ItemStruct) -> syn::Result<TokenStream> {
     if hasher.is_some() && !hash {
         return Err(syn::Error::new(name.span(), "`hasher` requires `hash`"));
     }
-    let owner_name = owner_name.unwrap_or_else(|| format_ident!("{}Arc", name));
+    let owner_name = owner_name.unwrap_or_else(|| format_ident!("{}Packed", name));
     if owner_name == *name {
         return Err(syn::Error::new(
             owner_name.span(),
@@ -404,6 +404,8 @@ pub(super) fn expand(item: ItemStruct) -> syn::Result<TokenStream> {
 mod tests {
     use super::*;
 
+    /// Checks that invalid field types, lifetimes, attributes, and reserved names
+    /// produce diagnostics identifying the violated rule.
     #[test]
     fn rejects_invalid_views_with_specific_diagnostics() {
         for (source, expected) in [
@@ -500,6 +502,8 @@ mod tests {
         }
     }
 
+    /// Checks that expansion produces parseable Rust for empty views and views with
+    /// payload lifetimes, outlives bounds, and type and const generics.
     #[test]
     fn lifetime_generics_are_filtered_and_rebound_in_generated_items() {
         for source in [

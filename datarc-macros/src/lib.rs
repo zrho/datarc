@@ -25,7 +25,20 @@ struct Field {
     slot: Index,
 }
 
-fn field_options(field: &syn::Field) -> syn::Result<Option<Type>> {
+fn field_options(field: &syn::Field) -> syn::Result<(Type, Option<Type>)> {
+    // Parentheses and invisible groups do not change whether a type is a slice.
+    let mut declared_type = &field.ty;
+    loop {
+        declared_type = match declared_type {
+            Type::Paren(ty) => &ty.elem,
+            Type::Group(ty) => &ty.elem,
+            _ => break,
+        };
+    }
+    let slice_element = match declared_type {
+        Type::Slice(ty) => Some(ty.elem.as_ref()),
+        _ => None,
+    };
     let mut multiplicity = None;
     let mut length = None;
     for attr in &field.attrs {
@@ -68,12 +81,22 @@ fn field_options(field: &syn::Field) -> syn::Result<Option<Type>> {
             Ok(())
         })?;
     }
-    if multiplicity == Some(true) {
-        Ok(Some(length.unwrap_or_else(|| syn::parse_quote!(usize))))
+    if slice_element.is_some() && multiplicity == Some(false) {
+        return Err(syn::Error::new(
+            field.ty.span(),
+            "a slice field is implicitly `many` and cannot be `once`",
+        ));
+    }
+    let ty = slice_element.unwrap_or(&field.ty).clone();
+    if slice_element.is_some() || multiplicity == Some(true) {
+        Ok((ty, Some(length.unwrap_or_else(|| syn::parse_quote!(usize)))))
     } else if length.is_some() {
-        Err(syn::Error::new(field.span(), "`len` requires `many`"))
+        Err(syn::Error::new(
+            field.span(),
+            "`len` requires a slice field `[T]` or explicit `many`",
+        ))
     } else {
-        Ok(None)
+        Ok((ty, None))
     }
 }
 
@@ -140,7 +163,7 @@ fn expand(args: TokenStream2, item: ItemStruct) -> syn::Result<TokenStream2> {
                 "field name conflicts with a generated constructor",
             ));
         }
-        let length = field_options(field)?;
+        let (ty, length) = field_options(field)?;
         let count = if length.is_some() {
             &mut many_count
         } else {
@@ -150,7 +173,7 @@ fn expand(args: TokenStream2, item: ItemStruct) -> syn::Result<TokenStream2> {
         *count += 1;
         fields.push(Field {
             ident,
-            ty: field.ty.clone(),
+            ty,
             vis: field.vis.clone(),
             attrs: field
                 .attrs
@@ -192,7 +215,7 @@ fn expand(args: TokenStream2, item: ItemStruct) -> syn::Result<TokenStream2> {
         .map(|f| {
             let ty = &f.ty;
             if f.length.is_some() {
-                quote!(::std::vec::Vec<#ty>)
+                quote!(impl ::std::iter::IntoIterator<Item = #ty, IntoIter: ::std::iter::ExactSizeIterator>)
             } else {
                 quote!(#ty)
             }
@@ -270,22 +293,22 @@ fn expand(args: TokenStream2, item: ItemStruct) -> syn::Result<TokenStream2> {
     let offset_names: Vec<_> = (0..many_count)
         .map(|i| format_ident!("__datarc_offset_{i}"))
         .collect();
-    let tail_writes =
-        many_inputs
-            .iter()
-            .zip(&many_types)
-            .zip(&many_indices)
-            .map(|((input, ty), index)| {
-                quote! {
-                    let __destination = __allocation.as_ptr().add(__offsets[#index]).cast::<#ty>();
-                    for (__index, __value) in ::std::iter::Iterator::enumerate(
-                        ::std::iter::IntoIterator::into_iter(#input)
-                    ) {
-                        __destination.add(__index).write(__value);
-                    }
-                }
-            });
-
+    let initialize_tails = if many_count == 0 {
+        TokenStream2::new()
+    } else {
+        quote! {
+            // SAFETY: each guard owns a distinct aligned array region from
+            // the checked layout. The allocation guard outlives these guards.
+            let mut __tails = unsafe { (#(
+                #runtime::__private::TailInit::<#many_types>::new(
+                    __allocation.as_ptr().add(__offsets[#many_indices]).cast(),
+                    __reported_lengths[#many_indices],
+                ),
+            )*) };
+            #(__tails.#many_indices.fill(#many_inputs, stringify!(#length_names))?;)*
+            ::std::mem::forget(__tails);
+        }
+    };
     Ok(quote! {
         #(#attrs)*
         #[repr(transparent)]
@@ -345,7 +368,8 @@ fn expand(args: TokenStream2, item: ItemStruct) -> syn::Result<TokenStream2> {
         }
 
         impl #impl_generics #name #ty_generics #where_clause {
-            /// Construct a record, panicking if a length or layout cannot be represented.
+            /// Construct a record from exact-size iterable inputs.
+            /// Panics if validation fails or an input iterator panics.
             #vis fn new(#(#names: #param_types),*) -> Self {
                 match Self::try_new(#(#names),*) {
                     ::std::result::Result::Ok(__value) => __value,
@@ -353,22 +377,25 @@ fn expand(args: TokenStream2, item: ItemStruct) -> syn::Result<TokenStream2> {
                 }
             }
 
-            /// Construct a record, checking lengths and allocation layout before moving fields.
+            /// Construct a record from exact-size iterable inputs, validating
+            /// reported lengths, allocation layout, and actual item counts.
+            /// Iterator panics propagate after cleaning up initialized values.
             /// Allocation failure follows the standard allocator's failure behavior.
             #vis fn try_new(#(#names: #param_types),*) -> ::std::result::Result<Self, #runtime::BuildError> {
                 let (#(#inputs,)*) = (#(#names,)*);
+                #(let #many_inputs = ::std::iter::IntoIterator::into_iter(#many_inputs);)*
+                let __reported_lengths = [#(::std::iter::ExactSizeIterator::len(&#many_inputs),)*];
                 let __lengths: (#(#length_types,)*) = (#(
-                    <#length_types as ::std::convert::TryFrom<usize>>::try_from(#many_inputs.len())
+                    <#length_types as ::std::convert::TryFrom<usize>>::try_from(__reported_lengths[#many_indices])
                         .map_err(|_| #runtime::BuildError::LengthOverflow {
-                            field: stringify!(#length_names), len: #many_inputs.len(),
+                            field: stringify!(#length_names), len: __reported_lengths[#many_indices],
                             length_type: stringify!(#length_types),
                         })?,
                 )*);
-                let (__layout, __offsets) = #storage_expr ::__datarc_layout([#(__lengths.#many_indices as usize,)*])?;
+                let (__layout, __offsets) = #storage_expr ::__datarc_layout(__reported_lengths)?;
                 let __allocation = #runtime::__private::allocate(__layout);
-                // SAFETY: all fallible validation precedes allocation. Header
-                // writes and moving elements from concrete Vec iterators cannot
-                // unwind. The calculated layout covers every written element.
+                // SAFETY: header initialization cannot unwind. Install its
+                // allocation guard before calling any user iterator code.
                 unsafe {
                     __allocation.cast::<#storage #ty_generics>().as_ptr().write(#storage {
                         __count: #runtime::__private::RefCount::default(),
@@ -376,9 +403,21 @@ fn expand(args: TokenStream2, item: ItemStruct) -> syn::Result<TokenStream2> {
                         __values: (#(#once_inputs,)*),
                         __marker: ::std::marker::PhantomData,
                     });
-                    #(#tail_writes)*
-                    ::std::result::Result::Ok(Self { __datarc: #runtime::__private::Shared::from_raw(__allocation.cast()) })
                 }
+                // SAFETY: the header is initialized and uniquely owned here.
+                let __header_guard = unsafe {
+                    #runtime::__private::Allocation::new(__allocation.cast::<#storage #ty_generics>(), __layout)
+                };
+                #initialize_tails
+                // Every array is fully initialized and every input iterator has
+                // been destroyed. Transfer all destruction rights to Shared;
+                // no user code can unwind between disarming guards and transfer.
+                let __ptr = __header_guard.into_raw();
+                // SAFETY: this is a complete allocation with count one and no
+                // remaining initialization guards or other owners.
+                ::std::result::Result::Ok(Self {
+                    __datarc: unsafe { #runtime::__private::Shared::from_raw(__ptr) }
+                })
             }
 
             #(#accessors)*
@@ -416,7 +455,15 @@ mod tests {
             ),
             (
                 "struct R { #[datarc(len = u8)] items: u8 }",
-                "requires `many`",
+                "requires a slice field",
+            ),
+            (
+                "struct R { #[datarc(once)] items: [u8] }",
+                "cannot be `once`",
+            ),
+            (
+                "struct R { #[datarc(len = i16)] items: [u8] }",
+                "length type must be",
             ),
             (
                 "struct R { #[datarc(many, once)] items: u8 }",
@@ -469,6 +516,7 @@ mod tests {
         for source in [
             "struct Empty {}",
             "struct R<'a, T: 'a, const N: usize = 2> where T: Send { label: &'a str, #[datarc(many, len = u8)] items: T, fixed: [u8; N] }",
+            "struct R<'a, T: 'a, const N: usize = 2> { label: &'a str, #[datarc(len = u8)] items: [T], fixed: [u8; N], nested: [[u8; N]], borrowed: &'a [T] }",
         ] {
             let tokens = expand(TokenStream2::new(), syn::parse_str(source).unwrap()).unwrap();
             syn::parse2::<syn::File>(tokens).unwrap();

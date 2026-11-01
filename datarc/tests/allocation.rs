@@ -73,3 +73,44 @@ fn construction_allocates_once_clone_never_allocates_and_last_drop_frees() {
     assert_eq!(ALLOCATIONS.with(Cell::get), 0);
     assert_eq!(DEALLOCATIONS.with(Cell::get), 1);
 }
+
+#[test]
+fn direct_generation_uses_one_allocation_without_temporary_buffers() {
+    COUNT.with(|b| b.set(true));
+    let record = Record::new(7, (0..4).map(|i| i * 2), [3, 4]);
+    COUNT.with(|b| b.set(false));
+    assert_eq!(ALLOCATIONS.with(Cell::get), 1);
+    assert_eq!(DEALLOCATIONS.with(Cell::get), 0);
+    assert_eq!(record.bytes(), &[0, 2, 4, 6]);
+
+    COUNT.with(|b| b.set(true));
+    drop(record);
+    COUNT.with(|b| b.set(false));
+    assert_eq!(DEALLOCATIONS.with(Cell::get), 1);
+}
+
+#[test]
+fn count_mismatch_releases_the_partial_allocation() {
+    struct WrongLength;
+    impl Iterator for WrongLength {
+        type Item = u64;
+        fn next(&mut self) -> Option<u64> {
+            None
+        }
+    }
+    impl ExactSizeIterator for WrongLength {
+        fn len(&self) -> usize {
+            1
+        }
+    }
+
+    COUNT.with(|b| b.set(true));
+    let result = Record::try_new(7, [1, 2], WrongLength);
+    COUNT.with(|b| b.set(false));
+    assert!(matches!(
+        result,
+        Err(datarc::BuildError::IteratorLengthMismatch { .. })
+    ));
+    assert_eq!(ALLOCATIONS.with(Cell::get), 1);
+    assert_eq!(DEALLOCATIONS.with(Cell::get), 1);
+}

@@ -11,7 +11,7 @@
 //! ```compile_fail
 //! use datarc::datarc;
 //! #[datarc]
-//! struct Record { #[datarc(many)] values: std::rc::Rc<u8> }
+//! struct Record { values: [std::rc::Rc<u8>] }
 //! fn require_send<T: Send>() {}
 //! require_send::<Record>();
 //! ```
@@ -20,7 +20,7 @@
 //! ```compile_fail
 //! use datarc::datarc;
 //! #[datarc]
-//! struct Record { #[datarc(many)] values: std::cell::Cell<u8> }
+//! struct Record { values: [std::cell::Cell<u8>] }
 //! fn require_send<T: Send>() {}
 //! require_send::<Record>();
 //! ```
@@ -29,7 +29,7 @@
 //! ```compile_fail
 //! use datarc::datarc;
 //! #[datarc]
-//! struct Record { #[datarc(many)] values: std::cell::Cell<u8> }
+//! struct Record { values: [std::cell::Cell<u8>] }
 //! fn require_sync<T: Sync>() {}
 //! require_sync::<Record>();
 //! ```
@@ -38,7 +38,7 @@
 //! ```compile_fail
 //! use datarc::datarc;
 //! #[datarc]
-//! struct Record { #[datarc(many)] values: u8 }
+//! struct Record { values: [u8] }
 //! let values = { let record = Record::new(vec![1]); record.values() };
 //! assert_eq!(values, &[1]);
 //! ```
@@ -47,7 +47,7 @@
 //! ```compile_fail
 //! use datarc::datarc;
 //! #[datarc]
-//! struct Record<'a> { #[datarc(many)] values: &'a str }
+//! struct Record<'a> { values: [&'a str] }
 //! let record = { let text = String::from("hello"); Record::new(vec![text.as_str()]) };
 //! assert_eq!(record.values(), &["hello"]);
 //! ```
@@ -62,4 +62,12 @@
 //! }
 //! let record = inner::Record::new(1);
 //! let _ = record.value();
+//! ```
+//!
+//! Iterators with unknown lengths require explicit collection first.
+//! ```compile_fail
+//! use datarc::datarc;
+//! #[datarc]
+//! struct Record { values: [u8] }
+//! let _ = Record::new((0..10).filter(|n| n % 2 == 0));
 //! ```

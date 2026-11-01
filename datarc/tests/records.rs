@@ -12,13 +12,12 @@ struct Aligned(u8);
 #[datarc]
 pub struct Mixed {
     pub id: u64,
-    #[datarc(many, len = u8)]
-    pub bytes: u8,
+    #[datarc(len = u8)]
+    pub bytes: [u8],
     pub name: String,
-    #[datarc(many, len = u16)]
-    aligned: Aligned,
-    #[datarc(many)]
-    pub words: String,
+    #[datarc(len = u16)]
+    aligned: [Aligned],
+    pub words: [String],
 }
 
 #[test]
@@ -75,13 +74,10 @@ fn empty_arrays_are_aligned() {
 #[datarc]
 struct Arithmetic<T, U, V> {
     tag: u8,
-    #[datarc(many)]
-    first: T,
+    first: [T],
     separator: bool,
-    #[datarc(many)]
-    second: U,
-    #[datarc(many)]
-    third: V,
+    second: [U],
+    third: [V],
 }
 
 #[derive(Default)]
@@ -98,10 +94,10 @@ fn accessor_offsets_match_checked_layout_across_padding_and_zero_sized_arrays() 
                 for third in [0, 2] {
                     let record = Arithmetic::<T, U, V>::new(
                         42,
-                        std::iter::repeat_with(T::default).take(first).collect(),
+                        (0..first).map(|_| T::default()),
                         true,
-                        std::iter::repeat_with(U::default).take(second).collect(),
-                        std::iter::repeat_with(V::default).take(third).collect(),
+                        (0..second).map(|_| U::default()),
+                        (0..third).map(|_| V::default()),
                     );
                     assert_eq!(*record.tag(), 42);
                     assert!(*record.separator());
@@ -150,8 +146,8 @@ where
     T: 'a,
 {
     label: &'a str,
-    #[datarc(many, len = u32)]
-    items: T,
+    #[datarc(len = u32)]
+    items: [T],
     array: [u8; N],
 }
 
@@ -164,6 +160,58 @@ fn generics_lifetimes_and_non_clone_elements() {
     assert_eq!(*copy.label(), "borrowed");
     assert_eq!(copy.items()[0].0, 42);
     assert_eq!(copy.array(), &[1, 2]);
+}
+
+#[datarc]
+struct SliceSyntax<'a, const N: usize> {
+    rows: [[u8; N]],
+    #[datarc(many, len = u8)]
+    labels: [String],
+    fixed: [u8; N],
+    borrowed: &'a [u8],
+    #[datarc(many, len = u16)]
+    legacy: u32,
+    parenthesized: ([u16]),
+}
+
+#[test]
+fn slice_syntax_distinguishes_fixed_arrays_references_and_element_types() {
+    let borrowed = [9, 8];
+    let record = SliceSyntax::new(
+        vec![[1, 2], [3, 4]],
+        vec!["label".into()],
+        [5, 6],
+        &borrowed,
+        vec![7],
+        vec![10, 11],
+    );
+    let rows: &[[u8; 2]] = record.rows();
+    let labels: &[String] = record.labels();
+    let fixed: &[u8; 2] = record.fixed();
+    let borrowed_slice: &&[u8] = record.borrowed();
+    assert_eq!(rows, &[[1, 2], [3, 4]]);
+    assert_eq!(labels, &["label"]);
+    assert_eq!(fixed, &[5, 6]);
+    assert!(std::ptr::eq(*borrowed_slice, borrowed.as_slice()));
+    assert_eq!(record.legacy(), &[7]);
+    assert_eq!(record.parenthesized(), &[10, 11]);
+    assert_eq!(size_of_val(&record), size_of::<usize>());
+}
+
+macro_rules! forwarded_record {
+    ($name:ident, $ty:ty) => {
+        #[datarc]
+        struct $name {
+            values: $ty,
+        }
+    };
+}
+
+forwarded_record!(ForwardedSlice, [u16]);
+
+#[test]
+fn slice_types_forwarded_through_macro_rules_are_recognized() {
+    assert_eq!(ForwardedSlice::new(vec![1, 2]).values(), &[1, 2]);
 }
 
 #[datarc]
@@ -197,8 +245,8 @@ impl Drop for Tracked {
 #[datarc]
 struct Dropping {
     fixed: Tracked,
-    #[datarc(many, len = u8)]
-    first: Tracked,
+    #[datarc(len = u8)]
+    first: [Tracked],
     #[datarc(many, len = u64)]
     second: Tracked,
 }
@@ -256,7 +304,7 @@ fn length_overflow_drops_inputs_and_reports_field() {
     let count = Arc::new(AtomicUsize::new(0));
     let result = Dropping::try_new(
         tracked(&count, false),
-        (0..256).map(|_| tracked(&count, false)).collect(),
+        (0..256).map(|_| tracked(&count, false)).collect::<Vec<_>>(),
         vec![tracked(&count, false)],
     );
     assert!(matches!(

@@ -8,7 +8,7 @@ pub use datarc_macros::datarc;
 #[cfg(doctest)]
 mod compile_checks;
 
-/// A record could not be represented by its selected length types or layout.
+/// Record construction failed validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildError {
     /// The input collection exceeds its field's length type.
@@ -19,6 +19,11 @@ pub enum BuildError {
     },
     /// The combined allocation exceeds Rust's allocation layout limits.
     LayoutOverflow,
+    /// An iterator yielded fewer or more items than its initially reported length.
+    IteratorLengthMismatch {
+        field: &'static str,
+        expected: usize,
+    },
 }
 
 impl std::fmt::Display for BuildError {
@@ -35,6 +40,10 @@ impl std::fmt::Display for BuildError {
                 )
             }
             Self::LayoutOverflow => f.write_str("record allocation layout is too large"),
+            Self::IteratorLengthMismatch { field, expected } => write!(
+                f,
+                "iterator for field `{field}` did not yield its reported length of {expected}"
+            ),
         }
     }
 }
@@ -136,9 +145,26 @@ pub mod __private {
         }
     }
 
-    struct Allocation<T> {
+    pub struct Allocation<T> {
         ptr: NonNull<T>,
         layout: Layout,
+    }
+
+    impl<T> Allocation<T> {
+        /// # Safety
+        /// `ptr` must point to an initialized header in a nonzero-sized global
+        /// allocation made with `layout`. This guard takes exclusive ownership of
+        /// destroying the header and freeing that allocation. Any trailing values
+        /// must be destroyed separately before this guard is dropped.
+        pub unsafe fn new(ptr: NonNull<T>, layout: Layout) -> Self {
+            Self { ptr, layout }
+        }
+
+        pub fn into_raw(self) -> NonNull<T> {
+            let ptr = self.ptr;
+            std::mem::forget(self);
+            ptr
+        }
     }
 
     impl<T> Drop for Allocation<T> {
@@ -173,6 +199,60 @@ pub mod __private {
         fn drop(&mut self) {
             // SAFETY: the creator transfers exclusive destruction rights.
             unsafe { ptr::drop_in_place(self.0) };
+        }
+    }
+
+    /// Owns the initialized prefix of one array during construction.
+    pub struct TailInit<T> {
+        ptr: *mut T,
+        capacity: usize,
+        initialized: usize,
+    }
+
+    impl<T> TailInit<T> {
+        /// # Safety
+        /// `ptr` must be aligned and designate space for `capacity` elements in
+        /// a live allocation. This guard takes exclusive initialization and
+        /// destruction rights for that region, which must outlive the guard.
+        pub unsafe fn new(ptr: *mut T, capacity: usize) -> Self {
+            Self {
+                ptr,
+                capacity,
+                initialized: 0,
+            }
+        }
+
+        pub fn fill<I: Iterator<Item = T>>(
+            &mut self,
+            mut iter: I,
+            field: &'static str,
+        ) -> Result<(), crate::BuildError> {
+            let mismatch = crate::BuildError::IteratorLengthMismatch {
+                field,
+                expected: self.capacity,
+            };
+            while self.initialized < self.capacity {
+                let value = iter.next().ok_or_else(|| mismatch.clone())?;
+                // SAFETY: the explicit bound above prevents trusting an
+                // iterator's length report; this slot is not initialized yet.
+                unsafe { self.ptr.add(self.initialized).write(value) };
+                self.initialized += 1;
+            }
+            // Observe at most one excess item, including for infinite iterators
+            // or a usize::MAX capacity of zero-sized elements.
+            if iter.next().is_some() {
+                return Err(mismatch);
+            }
+            Ok(())
+        }
+    }
+
+    impl<T> Drop for TailInit<T> {
+        fn drop(&mut self) {
+            // SAFETY: only the prefix counted after successful writes is live.
+            unsafe {
+                ptr::drop_in_place(ptr::slice_from_raw_parts_mut(self.ptr, self.initialized))
+            };
         }
     }
 

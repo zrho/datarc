@@ -3,7 +3,22 @@
 
 extern crate self as datarc;
 
-pub use datarc_macros::datarc;
+pub use datarc_macros::DataArc;
+
+/// Associates an ordinary borrowed view with its generated shared owner.
+pub trait DataArc {
+    type Owned: ArcData;
+}
+
+/// A shared owner that can lend a view value containing references to its data.
+pub trait ArcData: Sized {
+    type View<'a>: DataArc<Owned = Self>
+    where
+        Self: 'a;
+
+    /// Borrow the contents without allocating, cloning data, or changing the count.
+    fn as_view(&self) -> Self::View<'_>;
+}
 
 #[cfg(doctest)]
 mod compile_checks;
@@ -57,6 +72,34 @@ pub mod __private {
     use std::marker::PhantomData;
     use std::ptr::{self, NonNull};
     use std::sync::atomic::{fence, AtomicUsize, Ordering};
+
+    // Lifetime-dependent bounds on these helpers allow the derive to generate
+    // conditional conversions even for concrete, non-Clone referent types.
+    pub trait CloneValue {
+        type Value;
+        fn clone_value(self) -> Self::Value;
+    }
+
+    impl<T: Clone> CloneValue for &T {
+        type Value = T;
+        fn clone_value(self) -> T {
+            T::clone(self)
+        }
+    }
+
+    pub trait CloneItems {
+        type Item;
+        type Iter: ExactSizeIterator<Item = Self::Item>;
+        fn clone_items(self) -> Self::Iter;
+    }
+
+    impl<'a, T: Clone> CloneItems for &'a [T] {
+        type Item = T;
+        type Iter = std::iter::Cloned<std::slice::Iter<'a, T>>;
+        fn clone_items(self) -> Self::Iter {
+            self.iter().cloned()
+        }
+    }
 
     /// Its atomic is private so safe code cannot corrupt a live reference count.
     #[repr(transparent)]

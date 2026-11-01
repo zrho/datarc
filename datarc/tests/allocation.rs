@@ -1,6 +1,6 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use datarc::datarc;
+use datarc::DataArc;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
@@ -35,13 +35,14 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
-#[datarc]
-struct Record {
-    id: u64,
-    #[datarc(many, len = u8)]
-    bytes: u8,
-    #[datarc(many, len = u16)]
-    words: u64,
+#[derive(DataArc)]
+#[datarc(owned = Record)]
+struct RecordView<'view> {
+    id: &'view u64,
+    #[datarc(len = u8)]
+    bytes: &'view [u8],
+    #[datarc(len = u16)]
+    words: &'view [u64],
 }
 
 #[test]
@@ -112,5 +113,35 @@ fn count_mismatch_releases_the_partial_allocation() {
         Err(datarc::BuildError::IteratorLengthMismatch { .. })
     ));
     assert_eq!(ALLOCATIONS.with(Cell::get), 1);
+    assert_eq!(DEALLOCATIONS.with(Cell::get), 1);
+}
+
+#[derive(datarc::DataArc)]
+struct View<'a> {
+    id: &'a u64,
+    bytes: &'a [u8],
+}
+
+#[test]
+fn derived_view_cloning_allocates_once_and_borrowing_does_not_allocate() {
+    let id = 7;
+    let view = View {
+        id: &id,
+        bytes: &[1, 2, 3],
+    };
+    COUNT.with(|b| b.set(true));
+    let owner = ViewArc::try_from(&view).unwrap();
+    let borrowed = owner.as_view();
+    let via_from: View<'_> = (&owner).into();
+    let via_trait = datarc::ArcData::as_view(&owner);
+    COUNT.with(|b| b.set(false));
+    assert_eq!(*borrowed.id, 7);
+    assert!(std::ptr::eq(borrowed.bytes, via_from.bytes));
+    assert!(std::ptr::eq(borrowed.bytes, via_trait.bytes));
+    assert_eq!(ALLOCATIONS.with(Cell::get), 1);
+    assert_eq!(DEALLOCATIONS.with(Cell::get), 0);
+    COUNT.with(|b| b.set(true));
+    drop(owner);
+    COUNT.with(|b| b.set(false));
     assert_eq!(DEALLOCATIONS.with(Cell::get), 1);
 }

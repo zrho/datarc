@@ -1,4 +1,4 @@
-//! Attribute expansion for datarc's inline records.
+//! Derive expansion for datarc's borrowed views and inline shared owners.
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use proc_macro::TokenStream;
@@ -7,11 +7,13 @@ use quote::{format_ident, quote};
 use syn::ext::IdentExt;
 use syn::{parse_macro_input, spanned::Spanned, Fields, Index, ItemStruct, Type};
 
-/// Replace a named-field struct with a pointer-sized atomic shared handle.
-#[proc_macro_attribute]
-pub fn datarc(args: TokenStream, item: TokenStream) -> TokenStream {
+mod derive;
+
+/// Keep a reference-bearing view struct and generate its inline shared owner.
+#[proc_macro_derive(DataArc, attributes(datarc))]
+pub fn derive_data_arc(item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as ItemStruct);
-    expand(args.into(), item)
+    derive::expand(item)
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }
@@ -39,7 +41,6 @@ fn field_options(field: &syn::Field) -> syn::Result<(Type, Option<Type>)> {
         Type::Slice(ty) => Some(ty.elem.as_ref()),
         _ => None,
     };
-    let mut multiplicity = None;
     let mut length = None;
     for attr in &field.attrs {
         if !attr.path().is_ident("datarc") {
@@ -47,12 +48,7 @@ fn field_options(field: &syn::Field) -> syn::Result<(Type, Option<Type>)> {
             continue;
         }
         attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("many") || meta.path.is_ident("once") {
-                if multiplicity.is_some() {
-                    return Err(meta.error("specify multiplicity only once"));
-                }
-                multiplicity = Some(meta.path.is_ident("many"));
-            } else if meta.path.is_ident("len") {
+            if meta.path.is_ident("len") {
                 if length.is_some() {
                     return Err(meta.error("specify the length type only once"));
                 }
@@ -74,26 +70,18 @@ fn field_options(field: &syn::Field) -> syn::Result<(Type, Option<Type>)> {
                 }
                 length = Some(ty);
             } else {
-                return Err(
-                    meta.error("expected `once`, `many`, or `len = <unsigned integer type>`")
-                );
+                return Err(meta.error("expected `len = <unsigned integer type>`"));
             }
             Ok(())
         })?;
     }
-    if slice_element.is_some() && multiplicity == Some(false) {
-        return Err(syn::Error::new(
-            field.ty.span(),
-            "a slice field is implicitly `many` and cannot be `once`",
-        ));
-    }
     let ty = slice_element.unwrap_or(&field.ty).clone();
-    if slice_element.is_some() || multiplicity == Some(true) {
+    if slice_element.is_some() {
         Ok((ty, Some(length.unwrap_or_else(|| syn::parse_quote!(usize)))))
     } else if length.is_some() {
         Err(syn::Error::new(
             field.span(),
-            "`len` requires a slice field `[T]` or explicit `many`",
+            "`len` requires a slice field `&'a [T]`",
         ))
     } else {
         Ok((ty, None))
@@ -119,13 +107,8 @@ fn check_attr(attr: &syn::Attribute) -> syn::Result<()> {
     }
 }
 
-fn expand(args: TokenStream2, item: ItemStruct) -> syn::Result<TokenStream2> {
-    if !args.is_empty() {
-        return Err(syn::Error::new_spanned(
-            args,
-            "the struct attribute takes no arguments; configure lengths on individual fields",
-        ));
-    }
+/// Generate the owner from the derive's normalized owned-field representation.
+fn generate_owner(item: ItemStruct) -> syn::Result<TokenStream2> {
     for attr in &item.attrs {
         check_attr(attr)?;
     }
@@ -186,14 +169,7 @@ fn expand(args: TokenStream2, item: ItemStruct) -> syn::Result<TokenStream2> {
         });
     }
 
-    let runtime = match proc_macro_crate::crate_name("datarc") {
-        Ok(proc_macro_crate::FoundCrate::Name(name)) => {
-            let ident = format_ident!("{name}");
-            quote!(::#ident)
-        }
-        // `::datarc` also resolves in integration tests of the runtime package.
-        _ => quote!(::datarc),
-    };
+    let runtime = runtime_path();
     let name = &item.ident;
     let storage = format_ident!("__DatarcStorage_{}", name);
     let attrs = &item.attrs;
@@ -429,97 +405,13 @@ fn expand(args: TokenStream2, item: ItemStruct) -> syn::Result<TokenStream2> {
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn error(source: &str) -> String {
-        expand(TokenStream2::new(), syn::parse_str(source).unwrap())
-            .unwrap_err()
-            .to_string()
-    }
-
-    #[test]
-    fn rejects_unsupported_shapes() {
-        for source in ["struct Tuple(u8);", "struct Unit;"] {
-            assert!(error(source).contains("named fields"));
+fn runtime_path() -> TokenStream2 {
+    match proc_macro_crate::crate_name("datarc") {
+        Ok(proc_macro_crate::FoundCrate::Name(name)) => {
+            let ident = format_ident!("{name}");
+            quote!(::#ident)
         }
-    }
-
-    #[test]
-    fn rejects_invalid_field_configuration() {
-        for (source, message) in [
-            (
-                "struct R { #[datarc(many, len = i16)] items: u8 }",
-                "length type must be",
-            ),
-            (
-                "struct R { #[datarc(len = u8)] items: u8 }",
-                "requires a slice field",
-            ),
-            (
-                "struct R { #[datarc(once)] items: [u8] }",
-                "cannot be `once`",
-            ),
-            (
-                "struct R { #[datarc(len = i16)] items: [u8] }",
-                "length type must be",
-            ),
-            (
-                "struct R { #[datarc(many, once)] items: u8 }",
-                "multiplicity only once",
-            ),
-            (
-                "struct R { #[datarc(many)] #[datarc(many)] items: u8 }",
-                "multiplicity only once",
-            ),
-            (
-                "struct R { #[datarc(many, len = u8, len = u16)] items: u8 }",
-                "length type only once",
-            ),
-            (
-                "struct R { #[datarc(unknown)] items: u8 }",
-                "expected `once`",
-            ),
-            (
-                "struct R { #[cfg(unix)] items: u8 }",
-                "attribute is not supported",
-            ),
-            ("struct R { new: u8 }", "conflicts"),
-            ("struct R { r#new: u8 }", "conflicts"),
-            ("struct R { try_new: u8 }", "conflicts"),
-            ("struct R { items: Box<Self> }", "instead of `Self`"),
-            (
-                "#[derive(Clone)] struct R { items: u8 }",
-                "Clone is generated",
-            ),
-            (
-                "#[repr(C)] struct R { items: u8 }",
-                "attribute is not supported",
-            ),
-        ] {
-            assert!(error(source).contains(message), "{source}");
-        }
-        let item = syn::parse_quote!(
-            struct R {
-                items: u8,
-            }
-        );
-        assert!(expand(quote!(count = u32), item)
-            .unwrap_err()
-            .to_string()
-            .contains("takes no arguments"));
-    }
-
-    #[test]
-    fn generated_items_parse_with_generics_and_empty_records() {
-        for source in [
-            "struct Empty {}",
-            "struct R<'a, T: 'a, const N: usize = 2> where T: Send { label: &'a str, #[datarc(many, len = u8)] items: T, fixed: [u8; N] }",
-            "struct R<'a, T: 'a, const N: usize = 2> { label: &'a str, #[datarc(len = u8)] items: [T], fixed: [u8; N], nested: [[u8; N]], borrowed: &'a [T] }",
-        ] {
-            let tokens = expand(TokenStream2::new(), syn::parse_str(source).unwrap()).unwrap();
-            syn::parse2::<syn::File>(tokens).unwrap();
-        }
+        // Also resolves in integration tests of the runtime package.
+        _ => quote!(::datarc),
     }
 }

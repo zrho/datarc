@@ -1,6 +1,6 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use datarc::{datarc, BuildError};
+use datarc::{BuildError, DataArc};
 use std::mem::{align_of, size_of, size_of_val};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
@@ -9,15 +9,16 @@ use std::sync::{Arc, Barrier};
 #[derive(Default)]
 struct Aligned(u8);
 
-#[datarc]
-pub struct Mixed {
-    pub id: u64,
+#[derive(DataArc)]
+#[datarc(owned = Mixed)]
+pub struct MixedView<'view> {
+    pub id: &'view u64,
     #[datarc(len = u8)]
-    pub bytes: [u8],
-    pub name: String,
+    pub bytes: &'view [u8],
+    pub name: &'view String,
     #[datarc(len = u16)]
-    aligned: [Aligned],
-    pub words: [String],
+    aligned: &'view [Aligned],
+    pub words: &'view [String],
 }
 
 #[test]
@@ -71,13 +72,14 @@ fn empty_arrays_are_aligned() {
     assert_eq!(value.aligned().as_ptr() as usize % align_of::<Aligned>(), 0);
 }
 
-#[datarc]
-struct Arithmetic<T, U, V> {
-    tag: u8,
-    first: [T],
-    separator: bool,
-    second: [U],
-    third: [V],
+#[derive(DataArc)]
+#[datarc(owned = Arithmetic)]
+struct ArithmeticView<'view, T, U, V> {
+    tag: &'view u8,
+    first: &'view [T],
+    separator: &'view bool,
+    second: &'view [U],
+    third: &'view [V],
 }
 
 #[derive(Default)]
@@ -140,15 +142,16 @@ fn accessor_offsets_match_checked_layout_across_padding_and_zero_sized_arrays() 
     check::<u8, AlignedZst, u64>();
 }
 
-#[datarc]
-struct Generic<'a, T, const N: usize = 2>
+#[derive(DataArc)]
+#[datarc(owned = Generic)]
+struct GenericView<'view, 'a, T, const N: usize = 2>
 where
     T: 'a,
 {
-    label: &'a str,
+    label: &'view &'a str,
     #[datarc(len = u32)]
-    items: [T],
-    array: [u8; N],
+    items: &'view [T],
+    array: &'view [u8; N],
 }
 
 #[test]
@@ -162,16 +165,18 @@ fn generics_lifetimes_and_non_clone_elements() {
     assert_eq!(copy.array(), &[1, 2]);
 }
 
-#[datarc]
-struct SliceSyntax<'a, const N: usize> {
-    rows: [[u8; N]],
-    #[datarc(many, len = u8)]
-    labels: [String],
-    fixed: [u8; N],
-    borrowed: &'a [u8],
-    #[datarc(many, len = u16)]
-    legacy: u32,
-    parenthesized: ([u16]),
+#[derive(DataArc)]
+#[datarc(owned = SliceSyntax)]
+struct SliceSyntaxView<'view, 'a, const N: usize> {
+    rows: &'view [[u8; N]],
+    #[datarc(len = u8)]
+    labels: &'view [String],
+    fixed: &'view [u8; N],
+    borrowed: &'view &'a [u8],
+    #[datarc(len = u16)]
+    numbers: &'view [u32],
+    #[allow(unused_parens)]
+    parenthesized: (&'view [u16]),
 }
 
 #[test]
@@ -193,35 +198,37 @@ fn slice_syntax_distinguishes_fixed_arrays_references_and_element_types() {
     assert_eq!(labels, &["label"]);
     assert_eq!(fixed, &[5, 6]);
     assert!(std::ptr::eq(*borrowed_slice, borrowed.as_slice()));
-    assert_eq!(record.legacy(), &[7]);
+    assert_eq!(record.numbers(), &[7]);
     assert_eq!(record.parenthesized(), &[10, 11]);
     assert_eq!(size_of_val(&record), size_of::<usize>());
 }
 
 macro_rules! forwarded_record {
-    ($name:ident, $ty:ty) => {
-        #[datarc]
-        struct $name {
-            values: $ty,
+    ($view:ident, $owner:ident, $ty:ty) => {
+        #[derive(DataArc)]
+        #[datarc(owned = $owner)]
+        struct $view<'view> {
+            values: &'view $ty,
         }
     };
 }
 
-forwarded_record!(ForwardedSlice, [u16]);
+forwarded_record!(ForwardedSliceView, ForwardedSlice, [u16]);
 
 #[test]
 fn slice_types_forwarded_through_macro_rules_are_recognized() {
     assert_eq!(ForwardedSlice::new(vec![1, 2]).values(), &[1, 2]);
 }
 
-#[datarc]
-struct Fixed {
-    #[datarc(once)]
-    value: String,
+#[derive(DataArc)]
+#[datarc(owned = Fixed)]
+struct FixedView<'view> {
+    value: &'view String,
 }
 
-#[datarc]
-struct Empty {}
+#[derive(DataArc)]
+#[datarc(owned = Empty)]
+struct EmptyView {}
 
 #[test]
 fn fixed_only_and_empty_records() {
@@ -242,13 +249,14 @@ impl Drop for Tracked {
     }
 }
 
-#[datarc]
-struct Dropping {
-    fixed: Tracked,
+#[derive(DataArc)]
+#[datarc(owned = Dropping)]
+struct DroppingView<'view> {
+    fixed: &'view Tracked,
     #[datarc(len = u8)]
-    first: [Tracked],
-    #[datarc(many, len = u64)]
-    second: Tracked,
+    first: &'view [Tracked],
+    #[datarc(len = u64)]
+    second: &'view [Tracked],
 }
 
 fn tracked(count: &Arc<AtomicUsize>, panic: bool) -> Tracked {
@@ -341,12 +349,12 @@ impl Drop for Zst {
     }
 }
 
-#[datarc]
-struct ZeroSized {
-    #[datarc(many, len = u128)]
-    items: Zst,
-    #[datarc(many)]
-    empty: Zst,
+#[derive(DataArc)]
+#[datarc(owned = ZeroSized)]
+struct ZeroSizedView<'view> {
+    #[datarc(len = u128)]
+    items: &'view [Zst],
+    empty: &'view [Zst],
 }
 
 #[test]
@@ -361,11 +369,11 @@ fn aligned_zero_sized_elements_are_dropped() {
     assert_eq!(ZST_DROPS.load(Ordering::Relaxed) - before, 3);
 }
 
-#[datarc]
-struct Concurrent {
-    count: Arc<AtomicUsize>,
-    #[datarc(many)]
-    items: Tracked,
+#[derive(DataArc)]
+#[datarc(owned = Concurrent)]
+struct ConcurrentView<'view> {
+    count: &'view Arc<AtomicUsize>,
+    items: &'view [Tracked],
 }
 
 #[test]
@@ -399,10 +407,10 @@ fn concurrent_clone_and_drop() {
     assert_eq!(count.load(Ordering::Relaxed), 1);
 }
 
-#[datarc]
-struct Recursive {
-    #[datarc(many)]
-    children: Recursive,
+#[derive(DataArc)]
+#[datarc(owned = Recursive)]
+struct RecursiveView<'view> {
+    children: &'view [Recursive],
 }
 
 #[test]
@@ -411,12 +419,12 @@ fn recursive_records() {
     assert!(tree.children()[0].children().is_empty());
 }
 
-#[datarc]
-struct Names {
-    __lengths: usize,
-    #[datarc(many)]
-    __datarc_input_0: u8,
-    r#type: bool,
+#[derive(DataArc)]
+#[datarc(owned = Names)]
+struct NamesView<'view> {
+    __lengths: &'view usize,
+    __datarc_input_0: &'view [u8],
+    r#type: &'view bool,
 }
 
 #[test]

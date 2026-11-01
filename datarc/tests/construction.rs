@@ -1,4 +1,4 @@
-use datarc::{datarc, BuildError};
+use datarc::{BuildError, DataArc};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -21,12 +21,13 @@ fn counted(drops: &Arc<AtomicUsize>) -> Counted {
     }
 }
 
-#[datarc]
-struct Record {
-    fixed: Counted,
+#[derive(DataArc)]
+#[datarc(owned = Record)]
+struct RecordView<'view> {
+    fixed: &'view Counted,
     #[datarc(len = u8)]
-    first: [Counted],
-    second: [Counted],
+    first: &'view [Counted],
+    second: &'view [Counted],
 }
 
 // Deliberately violates ExactSizeIterator's contract. That is a logic error,
@@ -69,10 +70,11 @@ fn arrays_vectors_and_mapped_iterators_move_non_clone_values() {
     assert_eq!(Arc::strong_count(&drops), 1);
 }
 
-#[datarc]
-struct Numbers {
-    values: [u32],
-    names: [String],
+#[derive(DataArc)]
+#[datarc(owned = Numbers)]
+struct NumbersView<'view> {
+    values: &'view [u32],
+    names: &'view [String],
 }
 
 #[test]
@@ -320,9 +322,10 @@ fn compact_length_overflow_is_checked_before_generating_elements() {
     assert_eq!(drops.load(Ordering::Relaxed), 2);
 }
 
-#[datarc]
-struct ZeroSized {
-    values: [()],
+#[derive(DataArc)]
+#[datarc(owned = ZeroSized)]
+struct ZeroSizedView<'view> {
+    values: &'view [()],
 }
 
 #[test]

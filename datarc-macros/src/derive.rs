@@ -148,10 +148,26 @@ pub(super) fn expand(item: ItemStruct) -> syn::Result<TokenStream> {
     let runtime = super::runtime_path();
     let name = &item.ident;
     let mut owner_name = None;
+    let mut hash = false;
+    let mut hasher = None;
     for attr in item.attrs.iter().filter(|a| a.path().is_ident("datarc")) {
         attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("hash") {
+                if hash {
+                    return Err(meta.error("specify `hash` only once"));
+                }
+                hash = true;
+                return Ok(());
+            }
+            if meta.path.is_ident("hasher") {
+                if hasher.is_some() {
+                    return Err(meta.error("specify the hasher only once"));
+                }
+                hasher = Some(meta.value()?.parse::<Type>()?);
+                return Ok(());
+            }
             if !meta.path.is_ident("owned") {
-                return Err(meta.error("expected `owned = OwnerName`"));
+                return Err(meta.error("expected `owned = OwnerName`, `hash`, or `hasher = Type`"));
             }
             if owner_name.is_some() {
                 return Err(meta.error("specify the owner name only once"));
@@ -159,6 +175,9 @@ pub(super) fn expand(item: ItemStruct) -> syn::Result<TokenStream> {
             owner_name = Some(meta.value()?.parse::<syn::Ident>()?);
             Ok(())
         })?;
+    }
+    if hasher.is_some() && !hash {
+        return Err(syn::Error::new(name.span(), "`hasher` requires `hash`"));
     }
     let owner_name = owner_name.unwrap_or_else(|| format_ident!("{}Arc", name));
     if owner_name == *name {
@@ -297,13 +316,11 @@ pub(super) fn expand(item: ItemStruct) -> syn::Result<TokenStream> {
             );
         }
     }
-    let (conversion_impl, _, conversion_where) = conversion_generics.split_for_impl();
     let mut ref_generics = conversion_generics.clone();
     ref_generics.params.insert(
         0,
         syn::GenericParam::Lifetime(syn::LifetimeParam::new(view_ref.clone())),
     );
-    let (ref_impl, _, ref_where) = ref_generics.split_for_impl();
     let mut from_generics = owner.generics.clone();
     from_generics.params.insert(
         0,
@@ -314,7 +331,45 @@ pub(super) fn expand(item: ItemStruct) -> syn::Result<TokenStream> {
         .predicates
         .push(syn::parse_quote!(#owner_name #owner_args: #borrow));
     let (from_impl, _, from_where) = from_generics.split_for_impl();
-    let owner_code = super::generate_owner(owner.clone())?;
+    let hash_config = if hash {
+        let hasher = hasher
+            .unwrap_or_else(|| syn::parse_quote!(::std::collections::hash_map::DefaultHasher));
+        let bound = quote!(for<#borrow> #borrowed_view: ::std::hash::Hash);
+        let inferred_args: Vec<_> = item.generics.params.iter().zip(&borrowed_args).map(|(param, arg)| {
+            if matches!(param, GenericParam::Lifetime(p) if borrows.contains(&p.lifetime.ident.to_string())) {
+                quote!('_)
+            } else {
+                arg.clone()
+            }
+        }).collect();
+        let inferred_view = if inferred_args.is_empty() {
+            quote!(#name)
+        } else {
+            quote!(#name<#(#inferred_args),*>)
+        };
+        let compute = quote! {
+            let __view: #inferred_view = ::std::convert::From::from(&*__owner);
+            let mut __hasher = <#hasher as ::std::default::Default>::default();
+            ::std::hash::Hash::hash(&__view, &mut __hasher);
+            let __hash = ::std::hash::Hasher::finish(&__hasher);
+            // SAFETY: this owner is not published and the hash contains no references.
+            unsafe { (*__owner.__datarc.as_ptr()).__hash = __hash; }
+        };
+        Some((bound, compute))
+    } else {
+        None
+    };
+    if let Some((bound, _)) = &hash_config {
+        let predicate: WherePredicate = syn::parse2(bound.clone())?;
+        conversion_generics
+            .make_where_clause()
+            .predicates
+            .push(predicate.clone());
+        ref_generics.make_where_clause().predicates.push(predicate);
+    }
+    let (conversion_impl, _, conversion_where) = conversion_generics.split_for_impl();
+    let (ref_impl, _, ref_where) = ref_generics.split_for_impl();
+    let owner_code = super::generate_owner(owner.clone(), hash_config)?;
     Ok(quote! {
         #owner_code
 
@@ -352,6 +407,22 @@ mod tests {
     #[test]
     fn rejects_invalid_views_with_specific_diagnostics() {
         for (source, expected) in [
+            (
+                "#[datarc(hash, hash)] struct View<'a> { value: &'a u32 }",
+                "only once",
+            ),
+            (
+                "#[datarc(hasher = Foo)] struct View<'a> { value: &'a u32 }",
+                "requires `hash`",
+            ),
+            (
+                "#[datarc(hash, hasher = Foo, hasher = Bar)] struct View<'a> { value: &'a u32 }",
+                "hasher only once",
+            ),
+            (
+                "#[datarc(hash)] struct View<'a> { cached_hash: &'a u32 }",
+                "conflicts",
+            ),
             ("struct View(u8);", "named reference fields"),
             ("struct View;", "named reference fields"),
             ("struct View { value: u32 }", "shared references"),

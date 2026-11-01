@@ -230,6 +230,38 @@ pub mod __private {
         }
     }
 
+    /// Owns fully initialized storage until construction publishes an owner.
+    pub struct InitializationGuard<T: Storage> {
+        allocation: Option<Allocation<T>>,
+    }
+
+    impl<T: Storage> InitializationGuard<T> {
+        /// # Safety
+        /// The pointer must own fully initialized storage with the given layout.
+        pub unsafe fn new(ptr: NonNull<T>, layout: Layout, deallocate: bool) -> Self {
+            Self {
+                allocation: Some(unsafe { Allocation::new(ptr, layout, deallocate) }),
+            }
+        }
+
+        pub fn disarm(mut self) {
+            self.allocation
+                .take()
+                .expect("active initialization guard")
+                .into_raw();
+        }
+    }
+
+    impl<T: Storage> Drop for InitializationGuard<T> {
+        fn drop(&mut self) {
+            if let Some(allocation) = self.allocation.take() {
+                // The allocation guard also cleans up the header if a tail panics.
+                unsafe { T::drop_tail(allocation.ptr.as_ptr()) };
+                drop(allocation);
+            }
+        }
+    }
+
     pub struct Allocation<T> {
         ptr: NonNull<T>,
         layout: Layout,

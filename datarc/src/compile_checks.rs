@@ -190,6 +190,26 @@
 //! ```
 
 //!
+//! Hash caching requires the view to implement Hash.
+//! ```compile_fail
+//! use datarc::Packable;
+//! #[derive(Packable)]
+//! #[datarc(hash)]
+//! struct View<'a> { value: &'a u32 }
+//! let _ = ViewArc::new(42);
+//! ```
+//!
+//! A custom hasher must implement Hasher and Default.
+//! ```compile_fail
+//! use datarc::Packable;
+//! #[derive(Default)]
+//! struct NotAHasher;
+//! #[derive(Packable, Hash)]
+//! #[datarc(hash, hasher = NotAHasher)]
+//! struct View<'a> { value: &'a u32 }
+//! let _ = ViewArc::new(42);
+//! ```
+//!
 //! Unions cannot derive Packable.
 //! ```compile_fail
 //! use datarc::Packable;

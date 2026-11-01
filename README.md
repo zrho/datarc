@@ -136,6 +136,49 @@ freed by datarc. The caller retains responsibility for that region on failure.
 Borrowed payload lifetimes are preserved. `new_static` is a runtime constructor,
 not a `const fn`.
 
+### Cached hashes
+
+Add `#[datarc(hash)]` to a struct view that implements `std::hash::Hash` to
+compute a hash once when its owner is constructed:
+
+```rust
+use datarc::Packable;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
+#[derive(Packable, Hash)]
+#[datarc(hash)]
+struct Key<'a> {
+    id: &'a u64,
+    bytes: &'a [u8],
+}
+
+let owner = KeyArc::new(42, [1, 2, 3]);
+let mut hasher = DefaultHasher::new();
+Key::from(&owner).hash(&mut hasher);
+assert_eq!(owner.cached_hash(), hasher.finish());
+assert_eq!(owner.clone().cached_hash(), owner.cached_hash());
+```
+
+Owners with `#[datarc(hash)]` also implement `Hash`: they write the cached
+`u64` into the supplied hasher without hashing the view again. This hashes the
+cached value, so the owner's final hash need not equal the view's final hash.
+
+`cached_hash()` returns a `u64`. By default, construction uses
+`std::collections::hash_map::DefaultHasher`. Select another hasher with
+`#[datarc(hash, hasher = MyHasher)]`, where `MyHasher` implements
+`std::hash::Hasher + Default`.
+
+The hash comes from the fully initialized borrowed view's `Hash` implementation,
+not from hashing each stored field independently. You can implement `Hash`
+manually to select the data to hash. `new`, successful `try_new`, `new_static`,
+and both conversions from a view compute the hash once per new allocation.
+Cloning an owner shares its stored hash without hashing again; borrowing a view
+and calling `cached_hash()` do not rehash either. Interior mutations do not
+refresh the cache, so hash-relevant data must remain unchanged if you need the
+cached value to match the current view. Cached values are not a stable serialized
+fingerprint; their behavior depends on the chosen hasher and `Hash` implementation.
+
 The allocation begins with an atomic strong count, followed by the field lengths
 and ordinary values, then each array in declaration order with alignment padding.
 Accessors have inline hints and compute offsets directly from immutable lengths

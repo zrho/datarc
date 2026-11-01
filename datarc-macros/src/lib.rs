@@ -116,7 +116,25 @@ fn check_attr(attr: &syn::Attribute) -> syn::Result<()> {
 }
 
 /// Generate the owner from the derive's normalized owned-field representation.
-fn generate_owner(item: ItemStruct) -> syn::Result<TokenStream2> {
+fn generate_owner(
+    item: ItemStruct,
+    hash_config: Option<(TokenStream2, TokenStream2)>,
+) -> syn::Result<TokenStream2> {
+    let hash_enabled = hash_config.is_some();
+    let (hash_field, hash_init, hash_where, hash_compute, hash_accessor) = match hash_config {
+        Some((bound, compute)) => (
+            quote!(__hash: u64,),
+            quote!(__hash: 0,),
+            quote!(where #bound),
+            compute,
+            quote! {
+                /// Return the view hash computed during construction.
+                #[inline]
+                pub fn cached_hash(&self) -> u64 { self.__datarc.get().__hash }
+            },
+        ),
+        None => (quote!(), quote!(), quote!(), quote!(), quote!()),
+    };
     for attr in &item.attrs {
         check_attr(attr)?;
     }
@@ -148,6 +166,12 @@ fn generate_owner(item: ItemStruct) -> syn::Result<TokenStream2> {
     let mut fields = Vec::new();
     for field in &named.named {
         let ident = field.ident.clone().expect("named field");
+        if !hash_field.is_empty() && ident.unraw() == "cached_hash" {
+            return Err(syn::Error::new(
+                ident.span(),
+                "field name conflicts with the generated cached_hash accessor",
+            ));
+        }
         if ["new", "try_new", "new_static"]
             .iter()
             .any(|reserved| ident.unraw() == *reserved)
@@ -232,6 +256,24 @@ fn generate_owner(item: ItemStruct) -> syn::Result<TokenStream2> {
         .collect();
     let length_names: Vec<_> = many.iter().map(|f| &f.ident).collect();
 
+    let mut hash_parameter = format_ident!("__DatarcHasher");
+    while generics.params.iter().any(|param| match param {
+        syn::GenericParam::Type(p) => p.ident == hash_parameter,
+        syn::GenericParam::Const(p) => p.ident == hash_parameter,
+        _ => false,
+    }) {
+        hash_parameter = format_ident!("{}_", hash_parameter);
+    }
+    let hash_impl = hash_enabled.then(|| {
+        quote! {
+            impl #impl_generics ::std::hash::Hash for #name #ty_generics #where_clause {
+                #[inline]
+                fn hash<#hash_parameter: ::std::hash::Hasher>(&self, state: &mut #hash_parameter) {
+                    ::std::hash::Hasher::write_u64(state, self.cached_hash());
+                }
+            }
+        }
+    });
     let storage_expr = quote!(<#storage #ty_generics>);
     let accessors = fields.iter().map(|f| {
         let Field {
@@ -307,6 +349,8 @@ fn generate_owner(item: ItemStruct) -> syn::Result<TokenStream2> {
         }
     };
     Ok(quote! {
+        #hash_impl
+
         #(#attrs)*
         #[repr(transparent)]
         #vis struct #name #generics #where_clause {
@@ -318,6 +362,7 @@ fn generate_owner(item: ItemStruct) -> syn::Result<TokenStream2> {
         #[repr(C, align(16))]
         struct #storage #generics #where_clause {
             __count: #runtime::__private::RefCount,
+            #hash_field
             __lengths: (#(#length_types,)*),
             __values: (#(#once_types,)*),
             __marker: ::std::marker::PhantomData<(#(#many_types,)*)>,
@@ -368,7 +413,7 @@ fn generate_owner(item: ItemStruct) -> syn::Result<TokenStream2> {
             /// Construct a record from exact-size iterable inputs.
             /// Panics if validation fails or an input iterator panics.
             #[allow(clippy::too_many_arguments)]
-            #vis fn new(#(#names: #param_types),*) -> Self {
+            #vis fn new(#(#names: #param_types),*) -> Self #hash_where {
                 match Self::try_new(#(#names),*) {
                     ::std::result::Result::Ok(__value) => __value,
                     ::std::result::Result::Err(__error) => ::std::panic!("{}", __error),
@@ -380,7 +425,7 @@ fn generate_owner(item: ItemStruct) -> syn::Result<TokenStream2> {
             /// Iterator panics propagate after cleaning up initialized values.
             /// Allocation failure follows the standard allocator's failure behavior.
             #[allow(clippy::too_many_arguments)]
-            #vis fn try_new(#(#names: #param_types),*) -> ::std::result::Result<Self, #runtime::BuildError> {
+            #vis fn try_new(#(#names: #param_types),*) -> ::std::result::Result<Self, #runtime::BuildError> #hash_where {
                 // SAFETY: the global allocator returns correctly sized and
                 // aligned storage, which this owner may later deallocate.
                 unsafe { Self::#constructor(#runtime::__private::allocate, false, #(#names,)*) }
@@ -405,7 +450,7 @@ fn generate_owner(item: ItemStruct) -> syn::Result<TokenStream2> {
             #vis unsafe fn new_static(
                 #allocator: impl ::std::ops::FnOnce(::std::alloc::Layout) -> *mut u8,
                 #(#names: #param_types),*
-            ) -> Self {
+            ) -> Self #hash_where {
                 // SAFETY: the caller guarantees permanent storage with the
                 // requested layout; count mode is fixed before publication.
                 match unsafe { Self::#constructor(
@@ -427,7 +472,7 @@ fn generate_owner(item: ItemStruct) -> syn::Result<TokenStream2> {
                 #allocator: impl ::std::ops::FnOnce(::std::alloc::Layout) -> ::std::ptr::NonNull<u8>,
                 #is_static: bool,
                 #(#names: #param_types),*
-            ) -> ::std::result::Result<Self, #runtime::BuildError> {
+            ) -> ::std::result::Result<Self, #runtime::BuildError> #hash_where {
                 let (#(#inputs,)*) = (#(#names,)*);
                 #(let #many_inputs = ::std::iter::IntoIterator::into_iter(#many_inputs);)*
                 let __reported_lengths = [#(::std::iter::ExactSizeIterator::len(&#many_inputs),)*];
@@ -444,11 +489,8 @@ fn generate_owner(item: ItemStruct) -> syn::Result<TokenStream2> {
                 // allocation guard before calling any user iterator code.
                 unsafe {
                     __allocation.cast::<#storage #ty_generics>().as_ptr().write(#storage {
-                        __count: if #is_static {
-                            #runtime::__private::RefCount::new_static()
-                        } else {
-                            #runtime::__private::RefCount::default()
-                        },
+                        __count: #runtime::__private::RefCount::default(),
+                        #hash_init
                         __lengths,
                         __values: (#(#once_inputs,)*),
                         __marker: ::std::marker::PhantomData,
@@ -459,17 +501,27 @@ fn generate_owner(item: ItemStruct) -> syn::Result<TokenStream2> {
                     #runtime::__private::Allocation::new(__allocation.cast::<#storage #ty_generics>(), __layout, !#is_static)
                 };
                 #initialize_tails
-                // Every array is fully initialized and every input iterator has
-                // been destroyed. Transfer all destruction rights to Shared;
-                // no user code can unwind between disarming guards and transfer.
+                // Every array is initialized and every input iterator is destroyed.
+                // Transfer cleanup to a guard that also destroys the arrays if hashing panics.
                 let __ptr = __header_guard.into_raw();
-                // SAFETY: this is complete storage with count one or the immortal
-                // sentinel, and no remaining initialization guards or owners.
-                ::std::result::Result::Ok(Self {
+                // SAFETY: storage is fully initialized and exclusively owned.
+                // Keep cleanup independent of the refcount, including for caller-owned storage.
+                let __initialized = unsafe {
+                    #runtime::__private::InitializationGuard::new(__ptr, __layout, !#is_static)
+                };
+                let __owner = ::std::mem::ManuallyDrop::new(Self {
                     __datarc: unsafe { #runtime::__private::Shared::from_raw(__ptr) }
-                })
+                });
+                #hash_compute
+                if #is_static {
+                    // SAFETY: the owner is uniquely held and not yet published.
+                    unsafe { (*__owner.__datarc.as_ptr()).__count = #runtime::__private::RefCount::new_static(); }
+                }
+                __initialized.disarm();
+                ::std::result::Result::Ok(::std::mem::ManuallyDrop::into_inner(__owner))
             }
 
+            #hash_accessor
             #(#accessors)*
         }
 

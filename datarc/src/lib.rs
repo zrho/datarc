@@ -3,25 +3,41 @@
 
 extern crate self as datarc;
 
-pub use datarc_macros::DataArc;
+pub use datarc_macros::Packable;
 
-/// Associates an ordinary borrowed view with its generated shared owner.
-pub trait DataArc {
-    type Owned: ArcData;
-}
-
-/// A shared owner that can lend a view value containing references to its data.
-pub trait ArcData: Sized {
-    type View<'a>: DataArc<Owned = Self>
-    where
-        Self: 'a;
-
-    /// Borrow the contents without allocating, cloning data, or changing the count.
-    fn as_view(&self) -> Self::View<'_>;
+/// Associates a borrowed record or an enum of shared pointers with its packed owner.
+///
+/// The derive generates standard `From` conversions. Generic callers can require
+/// the conversion bounds they need in addition to this type association.
+pub trait Packable {
+    type Packed;
 }
 
 #[cfg(doctest)]
 mod compile_checks;
+
+/// An owning, thin pointer that can be stored in a packed enum.
+///
+/// Generated `Packable` struct owners implement this trait automatically.
+///
+/// # Safety
+/// `into_raw` must transfer one ownership unit to a non-null pointer whose address
+/// is divisible by 16, preserving provenance. `from_raw` must restore that unit
+/// without changing reference counts. Round trips must preserve the value and
+/// its drop behavior. Shared access to a temporarily restored owner must be valid
+/// while the original ownership unit remains alive (as for `Arc`).
+pub unsafe trait PackedPointer: Clone {
+    fn into_raw(self) -> std::ptr::NonNull<()>;
+
+    /// Restore an ownership unit previously transferred by `into_raw`.
+    ///
+    /// # Safety
+    /// The pointer must come from this type's `into_raw`, with all tag bits
+    /// removed, and its ownership unit must still be alive. The caller must
+    /// either take over that unit or suppress destruction of the restored value
+    /// and limit its use to shared access while the original unit stays alive.
+    unsafe fn from_raw(ptr: std::ptr::NonNull<()>) -> Self;
+}
 
 /// Record construction failed validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +89,8 @@ pub mod __private {
     use std::ptr::{self, NonNull};
     use std::sync::atomic::{fence, AtomicUsize, Ordering};
 
+    const STATIC_REFCOUNT: usize = usize::MAX;
+
     // Lifetime-dependent bounds on these helpers allow the derive to generate
     // conditional conversions even for concrete, non-Clone referent types.
     pub trait CloneValue {
@@ -105,6 +123,12 @@ pub mod __private {
     #[repr(transparent)]
     pub struct RefCount(AtomicUsize);
 
+    impl RefCount {
+        pub fn new_static() -> Self {
+            Self(AtomicUsize::new(STATIC_REFCOUNT))
+        }
+    }
+
     impl Default for RefCount {
         fn default() -> Self {
             Self(AtomicUsize::new(1))
@@ -113,8 +137,10 @@ pub mod __private {
 
     /// # Safety
     /// Implementations must return the same count and allocation layout for the
-    /// lifetime of an allocation. `drop_tail` must drop exactly the initialized
-    /// trailing elements, without destroying the header or freeing the allocation.
+    /// lifetime of an allocation. An immortal count must never change to or from
+    /// a counted value after publication. `drop_tail` must drop exactly the
+    /// initialized trailing elements, without destroying the header or freeing
+    /// the allocation.
     /// The header's Send/Sync and drop-check behavior must include all tail types.
     pub unsafe trait Storage: Sized {
         fn ref_count(&self) -> &RefCount;
@@ -138,13 +164,19 @@ pub mod __private {
 
     impl<T: Storage> Shared<T> {
         /// # Safety
-        /// `ptr` must be a fully initialized allocation with count one, allocated
-        /// by the global allocator using `T::layout()`, and have no other owner.
+        /// `ptr` must be fully initialized and transfer one live strong ownership
+        /// unit. Counted storage must use a global allocation made with
+        /// `T::layout()`; immortal storage must remain valid permanently.
         pub unsafe fn from_raw(ptr: NonNull<T>) -> Self {
             Self {
                 ptr,
                 marker: PhantomData,
             }
+        }
+
+        pub fn into_raw(self) -> NonNull<T> {
+            let this = std::mem::ManuallyDrop::new(self);
+            this.ptr
         }
 
         pub fn get(&self) -> &T {
@@ -159,10 +191,15 @@ pub mod __private {
 
     impl<T: Storage> Clone for Shared<T> {
         fn clone(&self) -> Self {
-            let old = self.get().ref_count().0.fetch_add(1, Ordering::Relaxed);
-            // Bound the count well below wraparound, including racing clones.
-            if old >= isize::MAX as usize {
-                std::process::abort();
+            let count = &self.get().ref_count().0;
+            // The sentinel is fixed before publication, so a relaxed load is
+            // sufficient and immortal allocations never perform a count update.
+            if count.load(Ordering::Relaxed) != STATIC_REFCOUNT {
+                let old = count.fetch_add(1, Ordering::Relaxed);
+                // Bound the count well below wraparound, including racing clones.
+                if old >= isize::MAX as usize {
+                    std::process::abort();
+                }
             }
             Self {
                 ptr: self.ptr,
@@ -173,13 +210,18 @@ pub mod __private {
 
     impl<T: Storage> Drop for Shared<T> {
         fn drop(&mut self) {
-            if self.get().ref_count().0.fetch_sub(1, Ordering::Release) != 1 {
+            let count = &self.get().ref_count().0;
+            if count.load(Ordering::Relaxed) == STATIC_REFCOUNT {
+                return;
+            }
+            if count.fetch_sub(1, Ordering::Release) != 1 {
                 return;
             }
             fence(Ordering::Acquire);
             let allocation = Allocation {
                 ptr: self.ptr,
                 layout: self.get().layout(),
+                deallocate: true,
             };
             // SAFETY: the last strong owner has exclusive access to the storage.
             // The guard drops the header and frees memory even if a tail panics.
@@ -191,16 +233,22 @@ pub mod __private {
     pub struct Allocation<T> {
         ptr: NonNull<T>,
         layout: Layout,
+        deallocate: bool,
     }
 
     impl<T> Allocation<T> {
         /// # Safety
-        /// `ptr` must point to an initialized header in a nonzero-sized global
-        /// allocation made with `layout`. This guard takes exclusive ownership of
-        /// destroying the header and freeing that allocation. Any trailing values
-        /// must be destroyed separately before this guard is dropped.
-        pub unsafe fn new(ptr: NonNull<T>, layout: Layout) -> Self {
-            Self { ptr, layout }
+        /// `ptr` must point to an initialized header in a live allocation of
+        /// `layout`. When `deallocate` is true it must be a global allocation,
+        /// and the guard takes ownership of freeing it. Otherwise the caller
+        /// retains responsibility for the storage. The guard always owns header
+        /// destruction; trailing values must be destroyed before it is dropped.
+        pub unsafe fn new(ptr: NonNull<T>, layout: Layout, deallocate: bool) -> Self {
+            Self {
+                ptr,
+                layout,
+                deallocate,
+            }
         }
 
         pub fn into_raw(self) -> NonNull<T> {
@@ -212,14 +260,16 @@ pub mod __private {
 
     impl<T> Drop for Allocation<T> {
         fn drop(&mut self) {
-            struct Free(NonNull<u8>, Layout);
+            struct Free(NonNull<u8>, Layout, bool);
             impl Drop for Free {
                 fn drop(&mut self) {
-                    // SAFETY: this guard owns the allocation and its exact layout.
-                    unsafe { dealloc(self.0.as_ptr(), self.1) };
+                    if self.2 {
+                        // SAFETY: this guard owns the global allocation and its exact layout.
+                        unsafe { dealloc(self.0.as_ptr(), self.1) };
+                    }
                 }
             }
-            let _free = Free(self.ptr.cast(), self.layout);
+            let _free = Free(self.ptr.cast(), self.layout, self.deallocate);
             // SAFETY: the allocation header is initialized and uniquely owned.
             unsafe { ptr::drop_in_place(self.ptr.as_ptr()) };
         }

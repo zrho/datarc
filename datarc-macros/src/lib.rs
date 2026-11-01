@@ -8,14 +8,22 @@ use syn::ext::IdentExt;
 use syn::{parse_macro_input, spanned::Spanned, Fields, Index, ItemStruct, Type};
 
 mod derive;
+mod packed;
 
-/// Keep a reference-bearing view struct and generate its inline shared owner.
-#[proc_macro_derive(DataArc, attributes(datarc))]
-pub fn derive_data_arc(item: TokenStream) -> TokenStream {
-    let item = parse_macro_input!(item as ItemStruct);
-    derive::expand(item)
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
+/// Generate an inline shared owner for a borrowed struct or a tagged pointer
+/// owner for an enum of thin shared pointers.
+#[proc_macro_derive(Packable, attributes(datarc))]
+pub fn derive_packable(item: TokenStream) -> TokenStream {
+    let item = parse_macro_input!(item as syn::Item);
+    let result = match item {
+        syn::Item::Struct(item) => derive::expand(item),
+        syn::Item::Enum(item) => packed::expand(item),
+        item => Err(syn::Error::new(
+            item.span(),
+            "Packable requires a struct or enum",
+        )),
+    };
+    result.unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
 struct Field {
@@ -140,7 +148,10 @@ fn generate_owner(item: ItemStruct) -> syn::Result<TokenStream2> {
     let mut fields = Vec::new();
     for field in &named.named {
         let ident = field.ident.clone().expect("named field");
-        if ident.unraw() == "new" || ident.unraw() == "try_new" {
+        if ["new", "try_new", "new_static"]
+            .iter()
+            .any(|reserved| ident.unraw() == *reserved)
+        {
             return Err(syn::Error::new(
                 ident.span(),
                 "field name conflicts with a generated constructor",
@@ -186,6 +197,16 @@ fn generate_owner(item: ItemStruct) -> syn::Result<TokenStream2> {
         .map(|i| format_ident!("__datarc_input_{i}"))
         .collect();
     let names: Vec<_> = fields.iter().map(|f| &f.ident).collect();
+    let fresh_ident = |stem: &str| {
+        let mut candidate = stem.to_owned();
+        while fields.iter().any(|f| f.ident.unraw() == candidate) {
+            candidate.push('_');
+        }
+        format_ident!("{candidate}")
+    };
+    let constructor = fresh_ident("__datarc_construct");
+    let allocator = fresh_ident("__datarc_allocator");
+    let is_static = fresh_ident("__datarc_static");
     let param_types: Vec<_> = fields
         .iter()
         .map(|f| {
@@ -294,7 +315,7 @@ fn generate_owner(item: ItemStruct) -> syn::Result<TokenStream2> {
 
         #[doc(hidden)]
         #[allow(non_camel_case_types)]
-        #[repr(C)]
+        #[repr(C, align(16))]
         struct #storage #generics #where_clause {
             __count: #runtime::__private::RefCount,
             __lengths: (#(#length_types,)*),
@@ -346,6 +367,7 @@ fn generate_owner(item: ItemStruct) -> syn::Result<TokenStream2> {
         impl #impl_generics #name #ty_generics #where_clause {
             /// Construct a record from exact-size iterable inputs.
             /// Panics if validation fails or an input iterator panics.
+            #[allow(clippy::too_many_arguments)]
             #vis fn new(#(#names: #param_types),*) -> Self {
                 match Self::try_new(#(#names),*) {
                     ::std::result::Result::Ok(__value) => __value,
@@ -357,7 +379,55 @@ fn generate_owner(item: ItemStruct) -> syn::Result<TokenStream2> {
             /// reported lengths, allocation layout, and actual item counts.
             /// Iterator panics propagate after cleaning up initialized values.
             /// Allocation failure follows the standard allocator's failure behavior.
+            #[allow(clippy::too_many_arguments)]
             #vis fn try_new(#(#names: #param_types),*) -> ::std::result::Result<Self, #runtime::BuildError> {
+                // SAFETY: the global allocator returns correctly sized and
+                // aligned storage, which this owner may later deallocate.
+                unsafe { Self::#constructor(#runtime::__private::allocate, false, #(#names,)*) }
+            }
+
+            /// Construct an immortal record in caller-provided permanent storage.
+            /// Clone and Drop inspect the immortal sentinel without updating it.
+            /// Neither the stored values nor the storage are destroyed on success.
+            ///
+            /// Panics on invalid lengths, layout, or iterator item counts. If
+            /// initialization fails or unwinds, initialized values are destroyed
+            /// but the supplied storage is never deallocated. A null pointer
+            /// follows the standard allocator's allocation-failure behavior.
+            ///
+            /// # Safety
+            /// The callback must return a unique, writable region satisfying the
+            /// supplied Layout's size and alignment. On success, the region must
+            /// remain valid for the rest of the process and must not be reused,
+            /// freed, or externally modified while it contains this record.
+            /// Payload references must still obey their own lifetimes.
+            #[allow(clippy::too_many_arguments)]
+            #vis unsafe fn new_static(
+                #allocator: impl ::std::ops::FnOnce(::std::alloc::Layout) -> *mut u8,
+                #(#names: #param_types),*
+            ) -> Self {
+                // SAFETY: the caller guarantees permanent storage with the
+                // requested layout; count mode is fixed before publication.
+                match unsafe { Self::#constructor(
+                    |__layout| ::std::ptr::NonNull::new(#allocator(__layout))
+                        .unwrap_or_else(|| ::std::alloc::handle_alloc_error(__layout)),
+                    true,
+                    #(#names,)*
+                ) } {
+                    ::std::result::Result::Ok(__value) => __value,
+                    ::std::result::Result::Err(__error) => ::std::panic!("{}", __error),
+                }
+            }
+
+            // SAFETY: the allocator must supply a unique writable region with
+            // the requested layout. Counted storage must be globally allocated;
+            // immortal storage must remain valid permanently on success.
+            #[allow(clippy::too_many_arguments)]
+            unsafe fn #constructor(
+                #allocator: impl ::std::ops::FnOnce(::std::alloc::Layout) -> ::std::ptr::NonNull<u8>,
+                #is_static: bool,
+                #(#names: #param_types),*
+            ) -> ::std::result::Result<Self, #runtime::BuildError> {
                 let (#(#inputs,)*) = (#(#names,)*);
                 #(let #many_inputs = ::std::iter::IntoIterator::into_iter(#many_inputs);)*
                 let __reported_lengths = [#(::std::iter::ExactSizeIterator::len(&#many_inputs),)*];
@@ -369,12 +439,16 @@ fn generate_owner(item: ItemStruct) -> syn::Result<TokenStream2> {
                         })?,
                 )*);
                 let (__layout, __offsets) = #storage_expr ::__datarc_layout(__reported_lengths)?;
-                let __allocation = #runtime::__private::allocate(__layout);
+                let __allocation = #allocator(__layout);
                 // SAFETY: header initialization cannot unwind. Install its
                 // allocation guard before calling any user iterator code.
                 unsafe {
                     __allocation.cast::<#storage #ty_generics>().as_ptr().write(#storage {
-                        __count: #runtime::__private::RefCount::default(),
+                        __count: if #is_static {
+                            #runtime::__private::RefCount::new_static()
+                        } else {
+                            #runtime::__private::RefCount::default()
+                        },
                         __lengths,
                         __values: (#(#once_inputs,)*),
                         __marker: ::std::marker::PhantomData,
@@ -382,21 +456,36 @@ fn generate_owner(item: ItemStruct) -> syn::Result<TokenStream2> {
                 }
                 // SAFETY: the header is initialized and uniquely owned here.
                 let __header_guard = unsafe {
-                    #runtime::__private::Allocation::new(__allocation.cast::<#storage #ty_generics>(), __layout)
+                    #runtime::__private::Allocation::new(__allocation.cast::<#storage #ty_generics>(), __layout, !#is_static)
                 };
                 #initialize_tails
                 // Every array is fully initialized and every input iterator has
                 // been destroyed. Transfer all destruction rights to Shared;
                 // no user code can unwind between disarming guards and transfer.
                 let __ptr = __header_guard.into_raw();
-                // SAFETY: this is a complete allocation with count one and no
-                // remaining initialization guards or other owners.
+                // SAFETY: this is complete storage with count one or the immortal
+                // sentinel, and no remaining initialization guards or owners.
                 ::std::result::Result::Ok(Self {
                     __datarc: unsafe { #runtime::__private::Shared::from_raw(__ptr) }
                 })
             }
 
             #(#accessors)*
+        }
+
+        // SAFETY: Shared transfers one strong unit; the storage header has
+        // alignment at least 16 and reconstruction preserves its provenance.
+        unsafe impl #impl_generics #runtime::PackedPointer for #name #ty_generics #where_clause {
+            fn into_raw(self) -> ::std::ptr::NonNull<()> {
+                self.__datarc.into_raw().cast()
+            }
+
+            unsafe fn from_raw(__ptr: ::std::ptr::NonNull<()>) -> Self {
+                Self {
+                    // SAFETY: caller transfers a live strong unit for this owner.
+                    __datarc: unsafe { #runtime::__private::Shared::from_raw(__ptr.cast()) },
+                }
+            }
         }
 
         impl #impl_generics ::std::clone::Clone for #name #ty_generics #where_clause {

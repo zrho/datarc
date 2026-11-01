@@ -1,4 +1,4 @@
-use datarc::{BuildError, DataArc};
+use datarc::{BuildError, Packable};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -21,7 +21,7 @@ fn counted(drops: &Arc<AtomicUsize>) -> Counted {
     }
 }
 
-#[derive(DataArc)]
+#[derive(Packable)]
 #[datarc(owned = Record)]
 struct RecordView<'view> {
     fixed: &'view Counted,
@@ -70,7 +70,7 @@ fn arrays_vectors_and_mapped_iterators_move_non_clone_values() {
     assert_eq!(Arc::strong_count(&drops), 1);
 }
 
-#[derive(DataArc)]
+#[derive(Packable)]
 #[datarc(owned = Numbers)]
 struct NumbersView<'view> {
     values: &'view [u32],
@@ -322,7 +322,7 @@ fn compact_length_overflow_is_checked_before_generating_elements() {
     assert_eq!(drops.load(Ordering::Relaxed), 2);
 }
 
-#[derive(DataArc)]
+#[derive(Packable)]
 #[datarc(owned = ZeroSized)]
 struct ZeroSizedView<'view> {
     values: &'view [()],

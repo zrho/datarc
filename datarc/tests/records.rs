@@ -1,6 +1,6 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use datarc::{BuildError, DataArc};
+use datarc::{BuildError, Packable};
 use std::mem::{align_of, size_of, size_of_val};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
@@ -9,7 +9,7 @@ use std::sync::{Arc, Barrier};
 #[derive(Default)]
 struct Aligned(u8);
 
-#[derive(DataArc)]
+#[derive(Packable)]
 #[datarc(owned = Mixed)]
 pub struct MixedView<'view> {
     pub id: &'view u64,
@@ -72,7 +72,7 @@ fn empty_arrays_are_aligned() {
     assert_eq!(value.aligned().as_ptr() as usize % align_of::<Aligned>(), 0);
 }
 
-#[derive(DataArc)]
+#[derive(Packable)]
 #[datarc(owned = Arithmetic)]
 struct ArithmeticView<'view, T, U, V> {
     tag: &'view u8,
@@ -142,7 +142,7 @@ fn accessor_offsets_match_checked_layout_across_padding_and_zero_sized_arrays() 
     check::<u8, AlignedZst, u64>();
 }
 
-#[derive(DataArc)]
+#[derive(Packable)]
 #[datarc(owned = Generic)]
 struct GenericView<'view, 'a, T, const N: usize = 2>
 where
@@ -165,7 +165,7 @@ fn generics_lifetimes_and_non_clone_elements() {
     assert_eq!(copy.array(), &[1, 2]);
 }
 
-#[derive(DataArc)]
+#[derive(Packable)]
 #[datarc(owned = SliceSyntax)]
 struct SliceSyntaxView<'view, 'a, const N: usize> {
     rows: &'view [[u8; N]],
@@ -205,7 +205,7 @@ fn slice_syntax_distinguishes_fixed_arrays_references_and_element_types() {
 
 macro_rules! forwarded_record {
     ($view:ident, $owner:ident, $ty:ty) => {
-        #[derive(DataArc)]
+        #[derive(Packable)]
         #[datarc(owned = $owner)]
         struct $view<'view> {
             values: &'view $ty,
@@ -220,13 +220,13 @@ fn slice_types_forwarded_through_macro_rules_are_recognized() {
     assert_eq!(ForwardedSlice::new(vec![1, 2]).values(), &[1, 2]);
 }
 
-#[derive(DataArc)]
+#[derive(Packable)]
 #[datarc(owned = Fixed)]
 struct FixedView<'view> {
     value: &'view String,
 }
 
-#[derive(DataArc)]
+#[derive(Packable)]
 #[datarc(owned = Empty)]
 struct EmptyView {}
 
@@ -249,7 +249,7 @@ impl Drop for Tracked {
     }
 }
 
-#[derive(DataArc)]
+#[derive(Packable)]
 #[datarc(owned = Dropping)]
 struct DroppingView<'view> {
     fixed: &'view Tracked,
@@ -349,7 +349,7 @@ impl Drop for Zst {
     }
 }
 
-#[derive(DataArc)]
+#[derive(Packable)]
 #[datarc(owned = ZeroSized)]
 struct ZeroSizedView<'view> {
     #[datarc(len = u128)]
@@ -369,7 +369,7 @@ fn aligned_zero_sized_elements_are_dropped() {
     assert_eq!(ZST_DROPS.load(Ordering::Relaxed) - before, 3);
 }
 
-#[derive(DataArc)]
+#[derive(Packable)]
 #[datarc(owned = Concurrent)]
 struct ConcurrentView<'view> {
     count: &'view Arc<AtomicUsize>,
@@ -407,7 +407,7 @@ fn concurrent_clone_and_drop() {
     assert_eq!(count.load(Ordering::Relaxed), 1);
 }
 
-#[derive(DataArc)]
+#[derive(Packable)]
 #[datarc(owned = Recursive)]
 struct RecursiveView<'view> {
     children: &'view [Recursive],
@@ -419,7 +419,7 @@ fn recursive_records() {
     assert!(tree.children()[0].children().is_empty());
 }
 
-#[derive(DataArc)]
+#[derive(Packable)]
 #[datarc(owned = Names)]
 struct NamesView<'view> {
     __lengths: &'view usize,

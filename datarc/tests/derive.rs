@@ -1,10 +1,10 @@
-use datarc::{ArcData, DataArc};
+use datarc::Packable;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
 
-#[derive(DataArc, Debug)]
+#[derive(Packable, Debug)]
 pub struct Record<'a> {
     pub id: &'a u64,
     #[datarc(len = u16)]
@@ -19,30 +19,30 @@ fn borrowed_view_and_owned_record_roundtrip() {
         id: &id,
         values: &values,
     };
-    let owner: <Record<'_> as DataArc>::Owned = RecordArc::try_from(&view).unwrap();
+    let owner: <Record<'_> as Packable>::Packed = RecordArc::from(&view);
     assert_eq!(
         std::mem::size_of::<RecordArc>(),
         std::mem::size_of::<usize>()
     );
     assert_eq!(*owner.id(), 42);
     assert_eq!(owner.values(), &values);
-    let borrowed = owner.as_view();
+    let borrowed = Record::from(&owner);
     assert!(std::ptr::eq(borrowed.id, owner.id()));
     assert!(std::ptr::eq(borrowed.values, owner.values()));
     let borrowed_from: Record<'_> = (&owner).into();
     assert!(std::ptr::eq(borrowed_from.values, owner.values()));
-    let copied = RecordArc::try_from(view).unwrap();
+    let copied = RecordArc::from(view);
     assert!(!std::ptr::eq(copied.values(), owner.values()));
     assert_eq!(copied.values(), owner.values());
-    fn generic_view<A: ArcData>(owner: &A) -> A::View<'_> {
-        owner.as_view()
+    fn generic_view<'a, V: Packable + From<&'a V::Packed>>(owner: &'a V::Packed) -> V {
+        owner.into()
     }
-    assert_eq!(generic_view(&owner).id, &42);
+    assert_eq!(generic_view::<Record<'_>>(&owner).id, &42);
 }
 
 struct NoClone;
 
-#[derive(DataArc)]
+#[derive(Packable)]
 struct NonClone<'a> {
     value: &'a NoClone,
     items: &'a [NoClone],
@@ -58,7 +58,7 @@ fn non_clone_referents_still_support_ownership_and_borrowing() {
     assert_eq!(view.items.len(), 2);
 }
 
-#[derive(DataArc, Debug)]
+#[derive(Packable, Debug)]
 #[datarc(owned = GenericOwner)]
 #[repr(C)]
 struct Generic<'view, 'data: 'view, T: 'view, const N: usize = 2>
@@ -75,19 +75,19 @@ where
 fn generic_view_lifetime_is_separate_from_borrowed_payload_lifetimes() {
     let text = String::from("payload");
     let owner = GenericOwner::new(17, text.as_str(), [[1, 2], [3, 4]], [5, 6]);
-    let view = owner.as_view();
+    let view = Generic::from(&owner);
     assert_eq!(*view.value, 17);
     assert_eq!(*view.payload, "payload");
     assert_eq!(view.rows, &[[1, 2], [3, 4]]);
     assert_eq!(view.fixed, &[5, 6]);
-    let copied = GenericOwner::try_from(&view).unwrap();
+    let copied = GenericOwner::from(&view);
     assert_eq!(copied.rows(), view.rows);
     assert_eq!(*copied.payload(), "payload");
     assert!(!std::ptr::eq(copied.rows(), view.rows));
     assert_eq!(std::mem::size_of_val(&copied), std::mem::size_of::<usize>());
 }
 
-#[derive(DataArc)]
+#[derive(Packable)]
 struct Separate<'a, 'b> {
     first: &'a u32,
     second: &'b [u32],
@@ -100,54 +100,40 @@ fn independent_source_lifetimes_are_reborrowed_from_one_owner() {
         first: &first,
         second: &[6, 7],
     };
-    let owner = SeparateArc::try_from(source).unwrap();
-    assert_eq!(owner.as_view().first, &5);
-    assert_eq!(owner.as_view().second, &[6, 7]);
+    let owner = SeparateArc::from(source);
+    assert_eq!(Separate::from(&owner).first, &5);
+    assert_eq!(Separate::from(&owner).second, &[6, 7]);
 }
 
-#[derive(DataArc)]
+#[derive(Packable)]
 struct Empty {}
 
-#[derive(DataArc)]
+#[derive(Packable)]
 struct Fixed<'a> {
     value: &'a String,
 }
 
 #[test]
 fn empty_and_fixed_only_views() {
-    let owner = EmptyArc::try_from(Empty {}).unwrap();
+    let owner = EmptyArc::from(Empty {});
     let _: Empty = (&owner).into();
     let owner = FixedArc::new("fixed".into());
-    let copy = FixedArc::try_from(owner.as_view()).unwrap();
-    assert_eq!(copy.as_view().value, "fixed");
+    let copy = FixedArc::from(Fixed::from(&owner));
+    assert_eq!(Fixed::from(&copy).value, "fixed");
 }
 
-#[derive(DataArc)]
+#[derive(Packable)]
 struct Compact<'a> {
     #[datarc(len = u8)]
     bytes: &'a [u8],
 }
 
 #[test]
-fn cloning_conversion_reports_length_errors() {
+fn cloning_conversion_panics_on_length_errors() {
     let bytes = vec![0; 256];
     let view = Compact { bytes: &bytes };
-    assert!(matches!(
-        CompactArc::try_from(&view),
-        Err(datarc::BuildError::LengthOverflow {
-            field: "bytes",
-            len: 256,
-            ..
-        })
-    ));
-    assert!(matches!(
-        CompactArc::try_from(view),
-        Err(datarc::BuildError::LengthOverflow {
-            field: "bytes",
-            len: 256,
-            ..
-        })
-    ));
+    assert!(std::panic::catch_unwind(|| CompactArc::from(&view)).is_err());
+    assert!(std::panic::catch_unwind(|| CompactArc::from(view)).is_err());
 }
 
 struct Counted {
@@ -181,7 +167,7 @@ impl Drop for Counted {
     }
 }
 
-#[derive(DataArc)]
+#[derive(Packable)]
 struct CloneView<'a> {
     fixed: &'a Counted,
     first: &'a [Counted],
@@ -200,11 +186,11 @@ fn conversion_clones_values_but_borrowing_and_owner_clone_do_not() {
         first: &first,
         second: &second,
     };
-    let owner = CloneViewArc::try_from(&source).unwrap();
+    let owner = CloneViewArc::from(&source);
     assert_eq!(live.load(Ordering::Relaxed), 6);
     assert_eq!(clones.load(Ordering::Relaxed), 3);
     let shared = owner.clone();
-    let view = shared.as_view();
+    let view = CloneView::from(&shared);
     assert!(std::ptr::eq(view.fixed, owner.fixed()));
     assert!(std::ptr::eq(view.first, owner.first()));
     assert!(std::ptr::eq(view.second, owner.second()));
@@ -231,8 +217,21 @@ fn clone_panics_release_every_partial_clone_and_preserve_source() {
             first: &first,
             second: &second,
         };
-        assert!(std::panic::catch_unwind(|| CloneViewArc::try_from(&source)).is_err());
+        assert!(std::panic::catch_unwind(|| CloneViewArc::from(&source)).is_err());
         assert_eq!(live.load(Ordering::Relaxed), 4);
         assert_eq!(source.first.len(), 2);
     }
+}
+
+#[derive(Packable)]
+struct FormerlyReserved<'a> {
+    as_view: &'a u32,
+}
+
+#[test]
+fn as_view_is_available_as_a_field_name() {
+    let owner = FormerlyReservedArc::new(42);
+    let view: FormerlyReserved<'_> = (&owner).into();
+    assert_eq!(*view.as_view, 42);
+    assert!(std::ptr::eq(view.as_view, owner.as_view()));
 }

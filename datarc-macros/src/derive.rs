@@ -2,7 +2,6 @@ use std::collections::BTreeSet;
 
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
-use syn::ext::IdentExt;
 use syn::{
     spanned::Spanned, Fields, GenericParam, Generics, ItemStruct, Lifetime, Type, TypeParamBound,
     WherePredicate,
@@ -148,7 +147,6 @@ fn fresh_lifetime(generics: &Generics, stem: &str) -> Lifetime {
 pub(super) fn expand(item: ItemStruct) -> syn::Result<TokenStream> {
     let runtime = super::runtime_path();
     let name = &item.ident;
-    let vis = &item.vis;
     let mut owner_name = None;
     for attr in item.attrs.iter().filter(|a| a.path().is_ident("datarc")) {
         attr.parse_nested_meta(|meta| {
@@ -172,7 +170,7 @@ pub(super) fn expand(item: ItemStruct) -> syn::Result<TokenStream> {
     let Fields::Named(original_fields) = &item.fields else {
         return Err(syn::Error::new(
             item.fields.span(),
-            "DataArc requires a struct with named reference fields",
+            "Packable requires a struct with named reference fields",
         ));
     };
     let mut owner = item.clone();
@@ -184,23 +182,16 @@ pub(super) fn expand(item: ItemStruct) -> syn::Result<TokenStream> {
     let mut borrows = BTreeSet::new();
     let mut references = Vec::new();
     for (field, storage_field) in original_fields.named.iter().zip(&mut owner_fields.named) {
-        let ident = field.ident.as_ref().unwrap();
-        if ident.unraw() == "as_view" {
-            return Err(syn::Error::new(
-                ident.span(),
-                "field name conflicts with the generated as_view method",
-            ));
-        }
         let Type::Reference(reference) = ungroup(&field.ty) else {
             return Err(syn::Error::new(
                 field.ty.span(),
-                "DataArc fields must be shared references: `&'a T` or `&'a [T]`",
+                "Packable fields must be shared references: `&'a T` or `&'a [T]`",
             ));
         };
         if reference.mutability.is_some() {
             return Err(syn::Error::new(
                 field.ty.span(),
-                "DataArc fields cannot be mutable references",
+                "Packable fields cannot be mutable references",
             ));
         }
         let Some(lifetime) = &reference.lifetime else {
@@ -248,7 +239,7 @@ pub(super) fn expand(item: ItemStruct) -> syn::Result<TokenStream> {
     }
     owner.generics = owner_generics(&item.generics, &borrows)?;
     let owner_generics = &owner.generics;
-    let (owner_impl, owner_args, owner_where) = owner_generics.split_for_impl();
+    let (_, owner_args, _) = owner_generics.split_for_impl();
     let (view_impl, view_args, view_where) = item.generics.split_for_impl();
     let borrow = fresh_lifetime(&item.generics, "__datarc_view");
     let view_ref = fresh_lifetime(&item.generics, "__datarc_ref");
@@ -327,40 +318,28 @@ pub(super) fn expand(item: ItemStruct) -> syn::Result<TokenStream> {
     Ok(quote! {
         #owner_code
 
-        impl #view_impl #runtime::DataArc for #name #view_args #view_where {
-            type Owned = #owner_name #owner_args;
-        }
-
-        impl #owner_impl #owner_name #owner_args #owner_where {
-            /// Assemble a borrowed view without allocation or reference counting.
-            #[inline]
-            #vis fn as_view<#borrow>(&#borrow self) -> #borrowed_view {
-                #name { #(#fields: self.#fields(),)* }
-            }
-        }
-
-        impl #owner_impl #runtime::ArcData for #owner_name #owner_args #owner_where {
-            type View<#borrow> = #borrowed_view where Self: #borrow;
-            #[inline]
-            fn as_view(&self) -> Self::View<'_> { self.as_view() }
+        impl #view_impl #runtime::Packable for #name #view_args #view_where {
+            type Packed = #owner_name #owner_args;
         }
 
         impl #from_impl ::std::convert::From<&#borrow #owner_name #owner_args> for #borrowed_view #from_where {
             #[inline]
-            fn from(__owner: &#borrow #owner_name #owner_args) -> Self { __owner.as_view() }
-        }
-
-        impl #ref_impl ::std::convert::TryFrom<&#view_ref #name #view_args> for #owner_name #owner_args #ref_where {
-            type Error = #runtime::BuildError;
-            fn try_from(__view: &#view_ref #name #view_args) -> ::std::result::Result<Self, Self::Error> {
-                Self::try_new(#(#clone_values),*)
+            fn from(__owner: &#borrow #owner_name #owner_args) -> Self {
+                #name { #(#fields: __owner.#fields(),)* }
             }
         }
 
-        impl #conversion_impl ::std::convert::TryFrom<#name #view_args> for #owner_name #owner_args #conversion_where {
-            type Error = #runtime::BuildError;
-            fn try_from(__view: #name #view_args) -> ::std::result::Result<Self, Self::Error> {
-                <Self as ::std::convert::TryFrom<&#name #view_args>>::try_from(&__view)
+        impl #ref_impl ::std::convert::From<&#view_ref #name #view_args> for #owner_name #owner_args #ref_where {
+            /// Clone the referenced contents. Panics on invalid lengths or layout.
+            fn from(__view: &#view_ref #name #view_args) -> Self {
+                Self::new(#(#clone_values),*)
+            }
+        }
+
+        impl #conversion_impl ::std::convert::From<#name #view_args> for #owner_name #owner_args #conversion_where {
+            /// Clone the referenced contents. Panics on invalid lengths or layout.
+            fn from(__view: #name #view_args) -> Self {
+                <Self as ::std::convert::From<&#name #view_args>>::from(&__view)
             }
         }
     })
@@ -425,10 +404,10 @@ mod tests {
                 "struct View<'a: 'static> { value: &'a u32 }",
                 "view lifetimes may only",
             ),
-            ("struct View<'a> { as_view: &'a u32 }", "conflicts"),
             ("struct View<'a> { new: &'a u32 }", "conflicts"),
             ("struct View<'a> { r#new: &'a u32 }", "conflicts"),
             ("struct View<'a> { try_new: &'a u32 }", "conflicts"),
+            ("struct View<'a> { new_static: &'a u32 }", "conflicts"),
             ("struct View<'a> { value: &'a Self }", "instead of `Self`"),
             (
                 "#[datarc(owned = View)] struct View<'a> { value: &'a u32 }",

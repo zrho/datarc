@@ -1,6 +1,6 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use datarc::DataArc;
+use datarc::Packable;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
@@ -35,7 +35,7 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
-#[derive(DataArc)]
+#[derive(Packable)]
 #[datarc(owned = Record)]
 struct RecordView<'view> {
     id: &'view u64,
@@ -116,7 +116,7 @@ fn count_mismatch_releases_the_partial_allocation() {
     assert_eq!(DEALLOCATIONS.with(Cell::get), 1);
 }
 
-#[derive(datarc::DataArc)]
+#[derive(datarc::Packable)]
 struct View<'a> {
     id: &'a u64,
     bytes: &'a [u8],
@@ -130,10 +130,10 @@ fn derived_view_cloning_allocates_once_and_borrowing_does_not_allocate() {
         bytes: &[1, 2, 3],
     };
     COUNT.with(|b| b.set(true));
-    let owner = ViewArc::try_from(&view).unwrap();
-    let borrowed = owner.as_view();
+    let owner = ViewArc::from(&view);
+    let borrowed = View::from(&owner);
     let via_from: View<'_> = (&owner).into();
-    let via_trait = datarc::ArcData::as_view(&owner);
+    let via_trait = <View<'_> as From<&ViewArc>>::from(&owner);
     COUNT.with(|b| b.set(false));
     assert_eq!(*borrowed.id, 7);
     assert!(std::ptr::eq(borrowed.bytes, via_from.bytes));
@@ -142,6 +142,33 @@ fn derived_view_cloning_allocates_once_and_borrowing_does_not_allocate() {
     assert_eq!(DEALLOCATIONS.with(Cell::get), 0);
     COUNT.with(|b| b.set(true));
     drop(owner);
+    COUNT.with(|b| b.set(false));
+    assert_eq!(DEALLOCATIONS.with(Cell::get), 1);
+}
+
+#[derive(datarc::Packable)]
+enum PackedValue {
+    Record(Record),
+}
+
+#[test]
+fn packing_inspecting_cloning_and_unpacking_do_not_allocate() {
+    let record = Record::new(7, [1, 2], [3, 4]);
+    ALLOCATIONS.with(|n| n.set(0));
+    DEALLOCATIONS.with(|n| n.set(0));
+    COUNT.with(|b| b.set(true));
+    let packed = PackedValuePacked::from(PackedValue::Record(record));
+    packed.with_enum(|value| match value {
+        PackedValue::Record(record) => assert_eq!(*record.id(), 7),
+    });
+    let clone = packed.clone();
+    drop(packed);
+    let unpacked = clone.into_enum();
+    COUNT.with(|b| b.set(false));
+    assert_eq!(ALLOCATIONS.with(Cell::get), 0);
+    assert_eq!(DEALLOCATIONS.with(Cell::get), 0);
+    COUNT.with(|b| b.set(true));
+    drop(unpacked);
     COUNT.with(|b| b.set(false));
     assert_eq!(DEALLOCATIONS.with(Cell::get), 1);
 }

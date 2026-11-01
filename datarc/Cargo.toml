@@ -1,0 +1,9 @@
+[package]
+name = "datarc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Thin atomic reference-counted records with inline variable-length fields"
+
+[dependencies]
+datarc-macros = { path = "../datarc-macros", version = "0.1.0" }

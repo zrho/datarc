@@ -134,7 +134,7 @@ fn owner_generics(original: &Generics, borrows: &BTreeSet<String>) -> syn::Resul
     Ok(result)
 }
 
-fn fresh_lifetime(generics: &Generics, stem: &str) -> Lifetime {
+pub(super) fn fresh_lifetime(generics: &Generics, stem: &str) -> Lifetime {
     for suffix in 0.. {
         let name = format!("{stem}_{suffix}");
         if !generics.lifetimes().any(|p| p.lifetime.ident == name) {
@@ -331,22 +331,22 @@ pub(super) fn expand(item: ItemStruct) -> syn::Result<TokenStream> {
         .predicates
         .push(syn::parse_quote!(#owner_name #owner_args: #borrow));
     let (from_impl, _, from_where) = from_generics.split_for_impl();
+    let inferred_args: Vec<_> = item.generics.params.iter().zip(&borrowed_args).map(|(param, arg)| {
+        if matches!(param, GenericParam::Lifetime(p) if borrows.contains(&p.lifetime.ident.to_string())) {
+            quote!('_)
+        } else {
+            arg.clone()
+        }
+    }).collect();
+    let inferred_view = if inferred_args.is_empty() {
+        quote!(#name)
+    } else {
+        quote!(#name<#(#inferred_args),*>)
+    };
     let hash_config = if hash {
         let hasher = hasher
             .unwrap_or_else(|| syn::parse_quote!(::std::collections::hash_map::DefaultHasher));
         let bound = quote!(for<#borrow> #borrowed_view: ::std::hash::Hash);
-        let inferred_args: Vec<_> = item.generics.params.iter().zip(&borrowed_args).map(|(param, arg)| {
-            if matches!(param, GenericParam::Lifetime(p) if borrows.contains(&p.lifetime.ident.to_string())) {
-                quote!('_)
-            } else {
-                arg.clone()
-            }
-        }).collect();
-        let inferred_view = if inferred_args.is_empty() {
-            quote!(#name)
-        } else {
-            quote!(#name<#(#inferred_args),*>)
-        };
         let compute = quote! {
             let __view: #inferred_view = ::std::convert::From::from(&*__owner);
             let mut __hasher = <#hasher as ::std::default::Default>::default();
@@ -370,8 +370,27 @@ pub(super) fn expand(item: ItemStruct) -> syn::Result<TokenStream> {
     let (conversion_impl, _, conversion_where) = conversion_generics.split_for_impl();
     let (ref_impl, _, ref_where) = ref_generics.split_for_impl();
     let owner_code = super::generate_owner(owner.clone(), hash_config)?;
+    let trait_impls = super::traits::expand(
+        &owner_name,
+        owner_generics,
+        &borrowed_view,
+        &borrow,
+        |binary, call| {
+            let other = binary.then(|| {
+                quote! {
+                    let __other: &#inferred_view = &::std::convert::From::from(other);
+                }
+            });
+            quote! {
+                let __view: &#inferred_view = &::std::convert::From::from(self);
+                #other
+                #call
+            }
+        },
+    );
     Ok(quote! {
         #owner_code
+        #trait_impls
 
         impl #view_impl #runtime::Packable for #name #view_args #view_where {
             type Packed = #owner_name #owner_args;

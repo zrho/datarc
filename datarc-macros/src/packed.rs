@@ -111,7 +111,22 @@ pub(super) fn expand(item: ItemEnum) -> syn::Result<TokenStream> {
         .predicates
         .push(syn::parse_quote!(#name #args: ::std::marker::Sync));
     let (sync_imp, _, sync_bounds) = sync_generics.split_for_impl();
+    let borrow = super::derive::fresh_lifetime(&generics, "__datarc_trait");
+    let trait_impls = super::traits::expand(
+        &packed,
+        &generics,
+        &quote!(#name #args),
+        &borrow,
+        |binary, call| {
+            if binary {
+                quote!(self.with_enum(|__view| other.with_enum(|__other| #call)))
+            } else {
+                quote!(self.with_enum(|__view| #call))
+            }
+        },
+    );
     Ok(quote! {
+        #trait_impls
         impl #imp #runtime::Packable for #name #args #bounds {
             type Packed = #packed #args;
         }

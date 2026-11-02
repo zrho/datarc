@@ -216,3 +216,59 @@
 //! #[derive(Packable)]
 //! union Value { byte: u8, word: u32 }
 //! ```
+//!
+//! Owners do not gain Debug when the view lacks it.
+//! ```compile_fail
+//! use datarc::Packable;
+//! #[derive(Packable)]
+//! struct View<'a> { value: &'a u32 }
+//! fn require<T: std::fmt::Debug>() {}
+//! require::<ViewPacked>();
+//! ```
+//!
+//! Owners do not gain PartialEq when the view lacks it.
+//! ```compile_fail
+//! use datarc::Packable;
+//! #[derive(Packable)]
+//! struct View<'a> { value: &'a u32 }
+//! fn require<T: PartialEq>() {}
+//! require::<ViewPacked>();
+//! ```
+//!
+//! PartialEq alone does not enable Eq on the owner.
+//! ```compile_fail
+//! use datarc::Packable;
+//! #[derive(Packable, PartialEq)]
+//! struct View<'a> { value: &'a u32 }
+//! fn require<T: Eq>() {}
+//! require::<ViewPacked>();
+//! ```
+//!
+//! Equality does not enable PartialOrd on the owner.
+//! ```compile_fail
+//! use datarc::Packable;
+//! #[derive(Packable, PartialEq, Eq)]
+//! struct View<'a> { value: &'a u32 }
+//! fn require<T: PartialOrd>() {}
+//! require::<ViewPacked>();
+//! ```
+//!
+//! PartialOrd does not enable Ord on the owner.
+//! ```compile_fail
+//! use datarc::Packable;
+//! #[derive(Packable, PartialEq, Eq, PartialOrd)]
+//! struct View<'a> { value: &'a u32 }
+//! fn require<T: Ord>() {}
+//! require::<ViewPacked>();
+//! ```
+//!
+//! Packed enums also require the original enum to implement the trait.
+//! ```compile_fail
+//! use datarc::Packable;
+//! #[derive(Packable, Debug)]
+//! struct View<'a> { value: &'a u32 }
+//! #[derive(Packable)]
+//! enum Value { View(ViewPacked) }
+//! fn require<T: std::fmt::Debug>() {}
+//! require::<ValuePacked>();
+//! ```

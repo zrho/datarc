@@ -9,6 +9,7 @@ use syn::{parse_macro_input, spanned::Spanned, Fields, Index, ItemStruct, Type};
 
 mod derive;
 mod packed;
+mod traits;
 
 /// Generate an inline shared owner for a borrowed struct or a tagged pointer
 /// owner for an enum of thin shared pointers.

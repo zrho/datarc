@@ -79,6 +79,17 @@ changing counts. Cloning a packed owner shares the underlying record.
 
 ## Advanced usage
 
+### Standard traits
+
+Owners implement `Debug`, `PartialEq`, `Eq`, `PartialOrd`, and `Ord` when their
+views implement the corresponding trait. Methods delegate to borrowed views,
+preserving custom formatting and comparison behavior without copying data.
+Packed enum owners delegate to the original enum in the same way.
+
+Record trait bounds cover every view borrow lifetime. Rust can therefore require
+`'static` payloads when a view declares explicit bounds such as `'data: 'view`;
+omit redundant outlives bounds to support borrowed payloads.
+
 ### Static
 
 The unsafe `RecordPacked::new_static(alloc, fields...)` constructor creates an

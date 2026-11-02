@@ -150,8 +150,26 @@ pub(super) fn expand(item: ItemStruct) -> syn::Result<TokenStream> {
     let mut owner_name = None;
     let mut hash = false;
     let mut hasher = None;
+    let mut equality = super::traits::EqualityOptions::default();
     for attr in item.attrs.iter().filter(|a| a.path().is_ident("datarc")) {
         attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("eq") {
+                meta.parse_nested_meta(|option| {
+                    let enabled = if option.path.is_ident("ptr_eq") {
+                        &mut equality.ptr_eq
+                    } else if option.path.is_ident("hash") {
+                        &mut equality.hash
+                    } else {
+                        return Err(option.error("expected `ptr_eq` or `hash`"));
+                    };
+                    if *enabled {
+                        return Err(option.error("specify each equality shortcut only once"));
+                    }
+                    *enabled = true;
+                    Ok(())
+                })?;
+                return Ok(());
+            }
             if meta.path.is_ident("hash") {
                 if hash {
                     return Err(meta.error("specify `hash` only once"));
@@ -167,7 +185,8 @@ pub(super) fn expand(item: ItemStruct) -> syn::Result<TokenStream> {
                 return Ok(());
             }
             if !meta.path.is_ident("owned") {
-                return Err(meta.error("expected `owned = OwnerName`, `hash`, or `hasher = Type`"));
+                return Err(meta
+                    .error("expected `owned = OwnerName`, `hash`, `hasher = Type`, or `eq(...)`"));
             }
             if owner_name.is_some() {
                 return Err(meta.error("specify the owner name only once"));
@@ -178,6 +197,9 @@ pub(super) fn expand(item: ItemStruct) -> syn::Result<TokenStream> {
     }
     if hasher.is_some() && !hash {
         return Err(syn::Error::new(name.span(), "`hasher` requires `hash`"));
+    }
+    if equality.hash && !hash {
+        return Err(syn::Error::new(name.span(), "`eq(hash)` requires `hash`"));
     }
     let owner_name = owner_name.unwrap_or_else(|| format_ident!("{}Packed", name));
     if owner_name == *name {
@@ -375,6 +397,7 @@ pub(super) fn expand(item: ItemStruct) -> syn::Result<TokenStream> {
         owner_generics,
         &borrowed_view,
         &borrow,
+        equality,
         |binary, call| {
             let other = binary.then(|| {
                 quote! {
@@ -428,6 +451,42 @@ mod tests {
     #[test]
     fn rejects_invalid_views_with_specific_diagnostics() {
         for (source, expected) in [
+            (
+                "#[datarc(eq(hash))] struct View<'a> { value: &'a u32 }",
+                "`eq(hash)` requires `hash`",
+            ),
+            (
+                "#[datarc(eq(ptr_eq, ptr_eq))] struct View<'a> { value: &'a u32 }",
+                "equality shortcut only once",
+            ),
+            (
+                "#[datarc(hash, eq(hash), eq(hash))] struct View<'a> { value: &'a u32 }",
+                "equality shortcut only once",
+            ),
+            (
+                "#[datarc(eq(unknown))] struct View<'a> { value: &'a u32 }",
+                "expected `ptr_eq` or `hash`",
+            ),
+            (
+                "#[datarc(eq())] struct View<'a> { value: &'a u32 }",
+                "expected nested attribute",
+            ),
+            (
+                "#[datarc(eq)] struct View<'a> { value: &'a u32 }",
+                "expected parentheses",
+            ),
+            (
+                "#[datarc(eq(ptr_eq = true))] struct View<'a> { value: &'a u32 }",
+                "expected `,`",
+            ),
+            (
+                "struct View<'a> { ptr_eq: &'a u32 }",
+                "conflicts with the generated ptr_eq method",
+            ),
+            (
+                "struct View<'a> { r#ptr_eq: &'a u32 }",
+                "conflicts with the generated ptr_eq method",
+            ),
             (
                 "#[datarc(hash, hash)] struct View<'a> { value: &'a u32 }",
                 "only once",

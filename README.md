@@ -86,6 +86,18 @@ views implement the corresponding trait. Methods delegate to borrowed views,
 preserving custom formatting and comparison behavior without copying data.
 Packed enum owners delegate to the original enum in the same way.
 
+Record owners also provide `ptr_eq(&self, other: &Self)` to check whether they
+share an allocation, regardless of whether their views implement equality.
+Separate allocations can contain equal values.
+
+Opt into equality shortcuts with `#[datarc(eq(ptr_eq))]` or
+`#[datarc(hash, eq(hash))]`; combine them with
+`#[datarc(hash, eq(ptr_eq, hash))]`. Matching pointers establish equality,
+different cached hashes refute it, and remaining comparisons delegate to the
+view. These shortcuts apply to both `eq` and `ne`, with the pointer check first.
+The pointer shortcut requires the view to implement `Eq`, preserving reflexive
+equality; ordering comparisons still delegate to the view.
+
 Record trait bounds cover every view borrow lifetime. Rust can therefore require
 `'static` payloads when a view declares explicit bounds such as `'data: 'view`;
 omit redundant outlives bounds to support borrowed payloads.
@@ -124,4 +136,7 @@ The owner also implements `Hash` by feeding the cached `u64` into the supplied
 hasher. Construction uses `DefaultHasher` by default; select another with
 `#[datarc(hash, hasher = MyHasher)]`, where `MyHasher: Hasher + Default`.
 Hash-relevant data must remain unchanged: interior mutations do not refresh the
-cache.
+cache. When using `eq(hash)`, the view's `Hash` and equality implementations must
+agree, and custom hashers must produce consistent hashes across allocations.
+Matching hashes still require a value comparison unless `eq(ptr_eq)` also
+establishes equality. Hash caching alone does not enable equality shortcuts.

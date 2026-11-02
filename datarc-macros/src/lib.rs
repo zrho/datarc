@@ -167,6 +167,12 @@ fn generate_owner(
     let mut fields = Vec::new();
     for field in &named.named {
         let ident = field.ident.clone().expect("named field");
+        if ident.unraw() == "ptr_eq" {
+            return Err(syn::Error::new(
+                ident.span(),
+                "field name conflicts with the generated ptr_eq method",
+            ));
+        }
         if !hash_field.is_empty() && ident.unraw() == "cached_hash" {
             return Err(syn::Error::new(
                 ident.span(),
@@ -411,6 +417,13 @@ fn generate_owner(
         }
 
         impl #impl_generics #name #ty_generics #where_clause {
+            /// Return whether both owners share the same allocation.
+            /// Distinct allocations can still contain equal values.
+            #[inline]
+            #vis fn ptr_eq(&self, other: &Self) -> bool {
+                ::std::ptr::eq(self.__datarc.as_ptr(), other.__datarc.as_ptr())
+            }
+
             /// Construct a record from exact-size iterable inputs.
             /// Panics if validation fails or an input iterator panics.
             #[allow(clippy::too_many_arguments)]

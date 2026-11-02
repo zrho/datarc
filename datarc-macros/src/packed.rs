@@ -117,6 +117,7 @@ pub(super) fn expand(item: ItemEnum) -> syn::Result<TokenStream> {
         &generics,
         &quote!(#name #args),
         &borrow,
+        super::traits::EqualityOptions::default(),
         |binary, call| {
             if binary {
                 quote!(self.with_enum(|__view| other.with_enum(|__other| #call)))

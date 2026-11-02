@@ -235,6 +235,26 @@
 //! require::<ViewPacked>();
 //! ```
 //!
+//! Pointer-shortcut equality requires Eq, even when the view has PartialEq.
+//! ```compile_fail
+//! use datarc::Packable;
+//! #[derive(Packable, PartialEq)]
+//! #[datarc(eq(ptr_eq))]
+//! struct View<'a> { value: &'a f64 }
+//! let owner = ViewPacked::new(f64::NAN);
+//! let _ = owner == owner.clone();
+//! ```
+//!
+//! Conditional ordering also requires Eq when pointer equality is enabled.
+//! ```compile_fail
+//! use datarc::Packable;
+//! #[derive(Packable, PartialEq, PartialOrd)]
+//! #[datarc(eq(ptr_eq))]
+//! struct View<'a, T> { value: &'a T }
+//! let owner = ViewPacked::new(f64::NAN);
+//! let _ = owner.partial_cmp(&owner);
+//! ```
+//!
 //! PartialEq alone does not enable Eq on the owner.
 //! ```compile_fail
 //! use datarc::Packable;

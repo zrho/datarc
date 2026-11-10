@@ -146,7 +146,7 @@ fn record_construction_allocates_once_and_getters_do_not_allocate() {
     assert_eq!(DEALLOCATIONS.with(Cell::get), 1);
 }
 
-#[derive(datarc::Packable)]
+#[datarc::packed]
 enum PackedValue {
     Record(Record),
 }

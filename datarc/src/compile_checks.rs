@@ -91,10 +91,9 @@
 //!
 //! Packed owners retain non-Send payload restrictions.
 //! ```compile_fail
-//! use datarc::Packable;
 //! #[datarc::record]
 //! struct Record { value: std::rc::Rc<u8> }
-//! #[derive(Packable)]
+//! #[datarc::packed]
 //! enum Value { Record(Record) }
 //! fn send<T: Send>() {}
 //! send::<ValuePacked>();
@@ -102,10 +101,9 @@
 //!
 //! Packed owners retain non-Sync payload restrictions.
 //! ```compile_fail
-//! use datarc::Packable;
 //! #[datarc::record]
 //! struct Record { value: std::cell::Cell<u8> }
-//! #[derive(Packable)]
+//! #[datarc::packed]
 //! enum Value { Record(Record) }
 //! fn sync<T: Sync>() {}
 //! sync::<ValuePacked>();
@@ -113,10 +111,9 @@
 //!
 //! Borrowed inspection cannot return references into its temporary enum.
 //! ```compile_fail
-//! use datarc::Packable;
 //! #[datarc::record]
 //! struct Record { value: u32 }
-//! #[derive(Packable)]
+//! #[datarc::packed]
 //! enum Value { Record(Record) }
 //! let packed = ValuePacked::from(Value::Record(Record::new(1)));
 //! let borrowed = packed.with_enum(|value| match value {
@@ -127,10 +124,9 @@
 //!
 //! Packed owners preserve the lifetime of borrowed payloads.
 //! ```compile_fail
-//! use datarc::Packable;
 //! #[datarc::record]
 //! struct Record<'data> { value: &'data str }
-//! #[derive(Packable)]
+//! #[datarc::packed]
 //! enum Value<'data> { Record(Record<'data>) }
 //! let packed = {
 //!     let text = String::from("borrowed");
@@ -141,8 +137,7 @@
 //!
 //! Unaligned pointer types cannot be packed.
 //! ```compile_fail
-//! use datarc::Packable;
-//! #[derive(Packable)]
+//! #[datarc::packed]
 //! enum Value { Byte(Box<u8>) }
 //! ```
 //!
@@ -166,10 +161,9 @@
 //! let _ = Record::new(42);
 //! ```
 //!
-//! Unions cannot derive Packable.
+//! The packed attribute cannot be used on unions.
 //! ```compile_fail
-//! use datarc::Packable;
-//! #[derive(Packable)]
+//! #[datarc::packed]
 //! union Value { byte: u8, word: u32 }
 //! ```
 //!
@@ -238,11 +232,10 @@
 //!
 //! Packed enums also require the original enum to implement the trait.
 //! ```compile_fail
-//! use datarc::Packable;
 //! #[datarc::record]
 //! #[derive(Debug)]
 //! struct Record { value: u32 }
-//! #[derive(Packable)]
+//! #[datarc::packed]
 //! enum Value { Record(Record) }
 //! fn require<T: std::fmt::Debug>() {}
 //! require::<ValuePacked>();

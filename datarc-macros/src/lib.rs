@@ -22,14 +22,13 @@ pub fn record(args: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Generate a tagged pointer owner for an enum of thin shared pointers.
-#[proc_macro_derive(Packable, attributes(datarc))]
-pub fn derive_packable(item: TokenStream) -> TokenStream {
-    let item = parse_macro_input!(item as syn::Item);
-    let result = match item {
-        syn::Item::Enum(item) => packed::expand(item),
-        item => Err(syn::Error::new(item.span(), "Packable requires an enum")),
-    };
-    result.unwrap_or_else(syn::Error::into_compile_error).into()
+#[proc_macro_attribute]
+pub fn packed(args: TokenStream, item: TokenStream) -> TokenStream {
+    let args = proc_macro2::TokenStream::from(args);
+    let item = parse_macro_input!(item as syn::ItemEnum);
+    packed::expand(args, item)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
 }
 
 struct Field {

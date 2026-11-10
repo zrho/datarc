@@ -3,15 +3,7 @@
 
 extern crate self as datarc;
 
-pub use datarc_macros::{record, Packable};
-
-/// Associates an enum of shared pointers with its packed owner.
-///
-/// The derive generates standard `From` conversions. Generic callers can require
-/// the conversion bounds they need in addition to this type association.
-pub trait Packable {
-    type Packed;
-}
+pub use datarc_macros::{packed, record};
 
 #[cfg(doctest)]
 mod compile_checks;

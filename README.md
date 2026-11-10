@@ -34,12 +34,11 @@ to the owner; field documentation and visibility apply to the getters.
 
 ## Enums
 
-Derive `Packable` on an enum whose variants each hold one record owner to produce
-a pointer-sized `ValuePacked`:
+Use `#[datarc::packed]` on an enum whose variants each hold one record owner to
+produce a pointer-sized `ValuePacked`. The original enum remains available for
+matching and conversions:
 
 ```rust
-use datarc::Packable;
-
 #[datarc::record]
 struct Text {
     bytes: [u8],
@@ -50,7 +49,7 @@ struct Number {
     value: u64,
 }
 
-#[derive(Packable)]
+#[datarc::packed]
 enum Value {
     Text(Text),
     Number(Number),
@@ -68,7 +67,8 @@ assert!(matches!(restored, Value::Number(_)));
 
 Up to 16 variants are supported. Packing and unpacking transfer ownership without
 allocating or updating reference counts. `with_enum` inspects the value without
-changing counts. Cloning a packed owner shares the underlying record.
+changing counts. Cloning a packed owner shares the underlying record. Use
+`#[datarc::packed(packed = CustomName)]` to set the packed owner's name.
 
 ## Advanced usage
 

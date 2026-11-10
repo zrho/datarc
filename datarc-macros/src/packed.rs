@@ -2,12 +2,24 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{spanned::Spanned, Fields, ItemEnum};
 
-pub(super) fn expand(item: ItemEnum) -> syn::Result<TokenStream> {
+pub(super) fn expand(args: TokenStream, mut item: ItemEnum) -> syn::Result<TokenStream> {
+    let mut option_attrs = Vec::new();
+    if !args.is_empty() {
+        option_attrs.push(syn::parse_quote!(#[datarc(#args)]));
+    }
+    item.attrs.retain(|attr| {
+        if attr.path().is_ident("datarc") {
+            option_attrs.push(attr.clone());
+            false
+        } else {
+            true
+        }
+    });
     let runtime = super::runtime_path();
     let name = &item.ident;
     let vis = &item.vis;
     let mut packed = None;
-    for attr in item.attrs.iter().filter(|a| a.path().is_ident("datarc")) {
+    for attr in option_attrs {
         attr.parse_nested_meta(|meta| {
             if !meta.path.is_ident("packed") {
                 return Err(meta.error("expected `packed = PackedName`"));
@@ -29,7 +41,7 @@ pub(super) fn expand(item: ItemEnum) -> syn::Result<TokenStream> {
     if item.variants.is_empty() || item.variants.len() > 16 {
         return Err(syn::Error::new(
             item.span(),
-            "Packable requires between 1 and 16 variants",
+            "packed requires between 1 and 16 variants",
         ));
     }
     // Self would refer to the packed type in copied bounds and field types.
@@ -54,20 +66,20 @@ pub(super) fn expand(item: ItemEnum) -> syn::Result<TokenStream> {
             if attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr") {
                 return Err(syn::Error::new(
                     attr.span(),
-                    "conditional variants and fields are not supported by Packable",
+                    "conditional variants and fields are not supported by packed",
                 ));
             }
         }
         let Fields::Unnamed(fields) = &variant.fields else {
             return Err(syn::Error::new(
                 variant.span(),
-                "Packable requires single-item tuple variants",
+                "packed requires single-item tuple variants",
             ));
         };
         if fields.unnamed.len() != 1 {
             return Err(syn::Error::new(
                 fields.span(),
-                "Packable requires single-item tuple variants",
+                "packed requires single-item tuple variants",
             ));
         }
         let ty = &fields.unnamed[0].ty;
@@ -127,10 +139,8 @@ pub(super) fn expand(item: ItemEnum) -> syn::Result<TokenStream> {
         },
     );
     Ok(quote! {
+        #item
         #trait_impls
-        impl #imp #runtime::Packable for #name #args #bounds {
-            type Packed = #packed #args;
-        }
 
         /// A pointer-sized owning representation with a four-bit variant tag.
         #[repr(transparent)]
@@ -283,9 +293,13 @@ mod tests {
                 }
             ),
         ] {
-            assert!(expand(syn::parse2(input).unwrap()).is_err());
+            assert!(expand(TokenStream::new(), syn::parse2(input).unwrap()).is_err());
         }
         let variants = (0..17).map(|i| format_ident!("V{i}"));
-        assert!(expand(syn::parse2(quote!(enum E { #(#variants(P),)* })).unwrap()).is_err());
+        assert!(expand(
+            TokenStream::new(),
+            syn::parse2(quote!(enum E { #(#variants(P),)* })).unwrap()
+        )
+        .is_err());
     }
 }

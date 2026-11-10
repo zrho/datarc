@@ -1,5 +1,5 @@
 #![deny(unsafe_op_in_unsafe_fn)]
-use datarc::{Packable, PackedPointer};
+use datarc::PackedPointer;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -21,7 +21,7 @@ struct Record {
 #[datarc::record]
 struct Empty {}
 
-#[derive(Packable)]
+#[datarc::packed]
 enum Value {
     Record(Record),
     Empty(Empty),
@@ -42,7 +42,7 @@ fn packed_ownership_and_borrowing() {
     let drops = Arc::new(AtomicUsize::new(0));
     let record = Record::new(Counted(drops.clone()), [1, 2, 3]);
     let original_address = record.bytes().as_ptr();
-    let packed: <Value as Packable>::Packed = Value::Record(record).into();
+    let packed: ValuePacked = Value::Record(record).into();
     packed.with_enum(|value| match value {
         Value::Record(record) => assert_eq!(record.bytes().as_ptr(), original_address),
         _ => panic!("wrong variant"),
@@ -73,8 +73,7 @@ struct Borrowed<'data, T, const N: usize> {
     value: T,
     bytes: [u8; N],
 }
-#[derive(Packable)]
-#[datarc(packed = GenericPacked)]
+#[datarc::packed(packed = GenericPacked)]
 enum Generic<'data, T, const N: usize = 2>
 where
     T: std::fmt::Debug,
@@ -98,7 +97,7 @@ fn generic_borrowed_payloads_and_threads() {
     }
 }
 
-#[derive(Packable)]
+#[datarc::packed]
 enum Sixteen {
     V0(Empty),
     V1(Empty),
@@ -196,19 +195,15 @@ fn static_owners_and_panicking_inspection() {
     assert_eq!(drops.load(Ordering::Relaxed), 0);
 }
 
-/// Checks that generic Packable functions can pack and unpack enums using associated
-/// types and From bounds.
+/// Checks that generic functions can pack and unpack enums using From bounds.
 #[test]
-fn enum_trait_supports_generic_conversion_roundtrips() {
-    fn pack<E: Packable>(value: E) -> E::Packed
-    where
-        E::Packed: From<E>,
-    {
-        E::Packed::from(value)
+fn generic_conversion_roundtrips() {
+    fn pack<E, P: From<E>>(value: E) -> P {
+        P::from(value)
     }
-    fn unpack<E: Packable + From<E::Packed>>(packed: E::Packed) -> E {
+    fn unpack<E: From<P>, P>(packed: P) -> E {
         E::from(packed)
     }
-    let packed = pack(Value::Empty(Empty::new()));
-    assert!(matches!(unpack::<Value>(packed), Value::Empty(_)));
+    let packed: ValuePacked = pack(Value::Empty(Empty::new()));
+    assert!(matches!(unpack::<Value, _>(packed), Value::Empty(_)));
 }

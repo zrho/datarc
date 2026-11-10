@@ -1,4 +1,3 @@
-use datarc::Packable;
 use std::cmp::Ordering;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
@@ -142,7 +141,8 @@ fn every_method_uses_the_custom_owner_implementation() {
     }
 }
 
-#[derive(Packable, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[datarc::packed]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Value {
     First(Record),
     Second(Record),

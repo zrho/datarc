@@ -1,4 +1,4 @@
-//! Derive expansion for datarc's borrowed views and inline shared owners.
+//! Macro expansion for inline shared records and packed enums.
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use proc_macro::TokenStream;
@@ -7,22 +7,27 @@ use quote::{format_ident, quote};
 use syn::ext::IdentExt;
 use syn::{parse_macro_input, spanned::Spanned, Fields, Index, ItemStruct, Type};
 
-mod derive;
 mod packed;
+mod record;
 mod traits;
 
-/// Generate an inline shared owner for a borrowed struct or a tagged pointer
-/// owner for an enum of thin shared pointers.
+/// Generate an inline shared record from a named-field declaration.
+#[proc_macro_attribute]
+pub fn record(args: TokenStream, item: TokenStream) -> TokenStream {
+    let args = proc_macro2::TokenStream::from(args);
+    let item = parse_macro_input!(item as ItemStruct);
+    record::expand(args, item)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Generate a tagged pointer owner for an enum of thin shared pointers.
 #[proc_macro_derive(Packable, attributes(datarc))]
 pub fn derive_packable(item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as syn::Item);
     let result = match item {
-        syn::Item::Struct(item) => derive::expand(item),
         syn::Item::Enum(item) => packed::expand(item),
-        item => Err(syn::Error::new(
-            item.span(),
-            "Packable requires a struct or enum",
-        )),
+        item => Err(syn::Error::new(item.span(), "Packable requires an enum")),
     };
     result.unwrap_or_else(syn::Error::into_compile_error).into()
 }
@@ -90,7 +95,7 @@ fn field_options(field: &syn::Field) -> syn::Result<(Type, Option<Type>)> {
     } else if length.is_some() {
         Err(syn::Error::new(
             field.span(),
-            "`len` requires a slice field `&'a [T]`",
+            "`len` requires a sequence field `[T]`",
         ))
     } else {
         Ok((ty, None))
@@ -116,12 +121,11 @@ fn check_attr(attr: &syn::Attribute) -> syn::Result<()> {
     }
 }
 
-/// Generate the owner from the derive's normalized owned-field representation.
+/// Generate a shared owner from a direct-field declaration.
 fn generate_owner(
     item: ItemStruct,
     hash_config: Option<(TokenStream2, TokenStream2)>,
 ) -> syn::Result<TokenStream2> {
-    let hash_enabled = hash_config.is_some();
     let (hash_field, hash_init, hash_where, hash_compute, hash_accessor) = match hash_config {
         Some((bound, compute)) => (
             quote!(__hash: u64,),
@@ -129,7 +133,7 @@ fn generate_owner(
             quote!(where #bound),
             compute,
             quote! {
-                /// Return the view hash computed during construction.
+                /// Return the field hash computed during construction.
                 #[inline]
                 pub fn cached_hash(&self) -> u64 { self.__datarc.get().__hash }
             },
@@ -167,10 +171,13 @@ fn generate_owner(
     let mut fields = Vec::new();
     for field in &named.named {
         let ident = field.ident.clone().expect("named field");
-        if ident.unraw() == "ptr_eq" {
+        if ["ptr_eq", "clone"]
+            .iter()
+            .any(|name| ident.unraw() == *name)
+        {
             return Err(syn::Error::new(
                 ident.span(),
-                "field name conflicts with the generated ptr_eq method",
+                "field name conflicts with a generated sharing method",
             ));
         }
         if !hash_field.is_empty() && ident.unraw() == "cached_hash" {
@@ -225,19 +232,29 @@ fn generate_owner(
     let length_types: Vec<_> = many.iter().map(|f| f.length.as_ref().unwrap()).collect();
     let many_indices: Vec<_> = many.iter().map(|f| &f.slot).collect();
     let inputs: Vec<_> = (0..fields.len())
-        .map(|i| format_ident!("__datarc_input_{i}"))
+        .map(|i| traits::fresh_ident(generics, &format!("__datarc_input_{i}")))
         .collect();
-    let names: Vec<_> = fields.iter().map(|f| &f.ident).collect();
     let fresh_ident = |stem: &str| {
-        let mut candidate = stem.to_owned();
-        while fields.iter().any(|f| f.ident.unraw() == candidate) {
-            candidate.push('_');
+        let mut candidate = traits::fresh_ident(generics, stem);
+        while fields.iter().any(|f| f.ident.unraw() == candidate.unraw()) {
+            candidate = traits::fresh_ident(generics, &format!("{candidate}_"));
         }
-        format_ident!("{candidate}")
+        candidate
     };
+    let names: Vec<_> = fields
+        .iter()
+        .map(|f| {
+            if generics.const_params().any(|p| p.ident == f.ident) {
+                fresh_ident(&format!("__datarc_arg_{}", f.ident.unraw()))
+            } else {
+                f.ident.clone()
+            }
+        })
+        .collect();
     let constructor = fresh_ident("__datarc_construct");
     let allocator = fresh_ident("__datarc_allocator");
     let is_static = fresh_ident("__datarc_static");
+    let other = fresh_ident("__datarc_other");
     let param_types: Vec<_> = fields
         .iter()
         .map(|f| {
@@ -263,24 +280,6 @@ fn generate_owner(
         .collect();
     let length_names: Vec<_> = many.iter().map(|f| &f.ident).collect();
 
-    let mut hash_parameter = format_ident!("__DatarcHasher");
-    while generics.params.iter().any(|param| match param {
-        syn::GenericParam::Type(p) => p.ident == hash_parameter,
-        syn::GenericParam::Const(p) => p.ident == hash_parameter,
-        _ => false,
-    }) {
-        hash_parameter = format_ident!("{}_", hash_parameter);
-    }
-    let hash_impl = hash_enabled.then(|| {
-        quote! {
-            impl #impl_generics ::std::hash::Hash for #name #ty_generics #where_clause {
-                #[inline]
-                fn hash<#hash_parameter: ::std::hash::Hasher>(&self, state: &mut #hash_parameter) {
-                    ::std::hash::Hasher::write_u64(state, self.cached_hash());
-                }
-            }
-        }
-    });
     let storage_expr = quote!(<#storage #ty_generics>);
     let accessors = fields.iter().map(|f| {
         let Field {
@@ -356,8 +355,6 @@ fn generate_owner(
         }
     };
     Ok(quote! {
-        #hash_impl
-
         #(#attrs)*
         #[repr(transparent)]
         #vis struct #name #generics #where_clause {
@@ -420,8 +417,8 @@ fn generate_owner(
             /// Return whether both owners share the same allocation.
             /// Distinct allocations can still contain equal values.
             #[inline]
-            #vis fn ptr_eq(&self, other: &Self) -> bool {
-                ::std::ptr::eq(self.__datarc.as_ptr(), other.__datarc.as_ptr())
+            #vis fn ptr_eq(&self, #other: &Self) -> bool {
+                ::std::ptr::eq(self.__datarc.as_ptr(), #other.__datarc.as_ptr())
             }
 
             /// Construct a record from exact-size iterable inputs.

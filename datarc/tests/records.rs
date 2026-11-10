@@ -1,6 +1,6 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use datarc::{BuildError, Packable};
+use datarc::BuildError;
 use std::mem::{align_of, size_of, size_of_val};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
@@ -9,16 +9,15 @@ use std::sync::{Arc, Barrier};
 #[derive(Default)]
 struct Aligned(u8);
 
-#[derive(Packable)]
-#[datarc(owned = Mixed)]
-pub struct MixedView<'view> {
-    pub id: &'view u64,
+#[datarc::record]
+pub struct Mixed {
+    pub id: u64,
     #[datarc(len = u8)]
-    pub bytes: &'view [u8],
-    pub name: &'view String,
+    pub bytes: [u8],
+    pub name: String,
     #[datarc(len = u16)]
-    aligned: &'view [Aligned],
-    pub words: &'view [String],
+    aligned: [Aligned],
+    pub words: [String],
 }
 
 /// Checks that a record and its Option are pointer-sized, independently sized arrays
@@ -75,14 +74,13 @@ fn empty_arrays_are_aligned() {
     assert_eq!(value.aligned().as_ptr() as usize % align_of::<Aligned>(), 0);
 }
 
-#[derive(Packable)]
-#[datarc(owned = Arithmetic)]
-struct ArithmeticView<'view, T, U, V> {
-    tag: &'view u8,
-    first: &'view [T],
-    separator: &'view bool,
-    second: &'view [U],
-    third: &'view [V],
+#[datarc::record]
+struct Arithmetic<T, U, V> {
+    tag: u8,
+    first: [T],
+    separator: bool,
+    second: [U],
+    third: [V],
 }
 
 #[derive(Default)]
@@ -147,16 +145,15 @@ fn accessor_offsets_match_checked_layout_across_padding_and_zero_sized_arrays() 
     check::<u8, AlignedZst, u64>();
 }
 
-#[derive(Packable)]
-#[datarc(owned = Generic)]
-struct GenericView<'view, 'a, T, const N: usize = 2>
+#[datarc::record]
+struct Generic<'a, T, const N: usize = 2>
 where
     T: 'a,
 {
-    label: &'view &'a str,
+    label: &'a str,
     #[datarc(len = u32)]
-    items: &'view [T],
-    array: &'view [u8; N],
+    items: [T],
+    array: [u8; N],
 }
 
 /// Checks that owners preserve type and const generics and borrowed payload lifetimes
@@ -172,18 +169,17 @@ fn generics_lifetimes_and_non_clone_elements() {
     assert_eq!(copy.array(), &[1, 2]);
 }
 
-#[derive(Packable)]
-#[datarc(owned = SliceSyntax)]
-struct SliceSyntaxView<'view, 'a, const N: usize> {
-    rows: &'view [[u8; N]],
+#[datarc::record]
+struct SliceSyntax<'a, const N: usize> {
+    rows: [[u8; N]],
     #[datarc(len = u8)]
-    labels: &'view [String],
-    fixed: &'view [u8; N],
-    borrowed: &'view &'a [u8],
+    labels: [String],
+    fixed: [u8; N],
+    borrowed: &'a [u8],
     #[datarc(len = u16)]
-    numbers: &'view [u32],
+    numbers: [u32],
     #[allow(unused_parens)]
-    parenthesized: (&'view [u16]),
+    parenthesized: ([u16]),
 }
 
 /// Checks that slice parsing distinguishes inline arrays from fixed arrays and borrowed
@@ -213,16 +209,15 @@ fn slice_syntax_distinguishes_fixed_arrays_references_and_element_types() {
 }
 
 macro_rules! forwarded_record {
-    ($view:ident, $owner:ident, $ty:ty) => {
-        #[derive(Packable)]
-        #[datarc(owned = $owner)]
-        struct $view<'view> {
-            values: &'view $ty,
+    ($owner:ident, $ty:ty) => {
+        #[datarc::record]
+        struct $owner {
+            values: $ty,
         }
     };
 }
 
-forwarded_record!(ForwardedSliceView, ForwardedSlice, [u16]);
+forwarded_record!(ForwardedSlice, [u16]);
 
 /// Checks that slice types passed through a macro_rules type fragment are recognized as
 /// inline arrays.
@@ -231,15 +226,13 @@ fn slice_types_forwarded_through_macro_rules_are_recognized() {
     assert_eq!(ForwardedSlice::new(vec![1, 2]).values(), &[1, 2]);
 }
 
-#[derive(Packable)]
-#[datarc(owned = Fixed)]
-struct FixedView<'view> {
-    value: &'view String,
+#[datarc::record]
+struct Fixed {
+    value: String,
 }
 
-#[derive(Packable)]
-#[datarc(owned = Empty)]
-struct EmptyView {}
+#[datarc::record]
+struct Empty {}
 
 /// Checks construction and cloning for records with only fixed fields or no fields,
 /// including pointer-sized empty owners.
@@ -262,14 +255,13 @@ impl Drop for Tracked {
     }
 }
 
-#[derive(Packable)]
-#[datarc(owned = Dropping)]
-struct DroppingView<'view> {
-    fixed: &'view Tracked,
+#[datarc::record]
+struct Dropping {
+    fixed: Tracked,
     #[datarc(len = u8)]
-    first: &'view [Tracked],
+    first: [Tracked],
     #[datarc(len = u64)]
-    second: &'view [Tracked],
+    second: [Tracked],
 }
 
 fn tracked(count: &Arc<AtomicUsize>, panic: bool) -> Tracked {
@@ -372,12 +364,11 @@ impl Drop for Zst {
     }
 }
 
-#[derive(Packable)]
-#[datarc(owned = ZeroSized)]
-struct ZeroSizedView<'view> {
+#[datarc::record]
+struct ZeroSized {
     #[datarc(len = u128)]
-    items: &'view [Zst],
-    empty: &'view [Zst],
+    items: [Zst],
+    empty: [Zst],
 }
 
 /// Checks alignment for populated and empty slices of zero-sized elements and verifies
@@ -394,11 +385,10 @@ fn aligned_zero_sized_elements_are_dropped() {
     assert_eq!(ZST_DROPS.load(Ordering::Relaxed) - before, 3);
 }
 
-#[derive(Packable)]
-#[datarc(owned = Concurrent)]
-struct ConcurrentView<'view> {
-    count: &'view Arc<AtomicUsize>,
-    items: &'view [Tracked],
+#[datarc::record]
+struct Concurrent {
+    count: Arc<AtomicUsize>,
+    items: [Tracked],
 }
 
 /// Checks Send and Sync support, concurrent owner cloning and access, and exactly one
@@ -434,10 +424,10 @@ fn concurrent_clone_and_drop() {
     assert_eq!(count.load(Ordering::Relaxed), 1);
 }
 
-#[derive(Packable)]
-#[datarc(owned = Recursive)]
-struct RecursiveView<'view> {
-    children: &'view [Recursive],
+#[datarc::record]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct Recursive {
+    children: [Recursive],
 }
 
 /// Checks that a record can own an inline array of owners of the same record type.
@@ -447,12 +437,11 @@ fn recursive_records() {
     assert!(tree.children()[0].children().is_empty());
 }
 
-#[derive(Packable)]
-#[datarc(owned = Names)]
-struct NamesView<'view> {
-    __lengths: &'view usize,
-    __datarc_input_0: &'view [u8],
-    r#type: &'view bool,
+#[datarc::record]
+struct Names {
+    __lengths: usize,
+    __datarc_input_0: [u8],
+    r#type: bool,
 }
 
 /// Checks that raw identifiers and field names resembling generated internals receive

@@ -1,144 +1,101 @@
 //! Non-Send types in ordinary fields cannot cross threads.
 //! ```compile_fail
-//! use datarc::Packable;
-//! #[derive(Packable)]
-//! struct Record<'a> { value: &'a std::rc::Rc<u8> }
+//! #[datarc::record]
+//! struct Record { value: std::rc::Rc<u8> }
 //! fn require_send<T: Send>() {}
-//! require_send::<RecordPacked>();
+//! require_send::<Record>();
 //! ```
 //!
 //! Non-Send types in arrays cannot cross threads either.
 //! ```compile_fail
-//! use datarc::Packable;
-//! #[derive(Packable)]
-//! struct Record<'a> { values: &'a [std::rc::Rc<u8>] }
+//! #[datarc::record]
+//! struct Record { values: [std::rc::Rc<u8>] }
 //! fn require_send<T: Send>() {}
-//! require_send::<RecordPacked>();
+//! require_send::<Record>();
 //! ```
 //!
 //! Array elements must also be Sync for the shared handle to be Send.
 //! ```compile_fail
-//! use datarc::Packable;
-//! #[derive(Packable)]
-//! struct Record<'a> { values: &'a [std::cell::Cell<u8>] }
+//! #[datarc::record]
+//! struct Record { values: [std::cell::Cell<u8>] }
 //! fn require_send<T: Send>() {}
-//! require_send::<RecordPacked>();
+//! require_send::<Record>();
 //! ```
 //!
 //! Shared handles containing non-Sync elements cannot be shared by reference.
 //! ```compile_fail
-//! use datarc::Packable;
-//! #[derive(Packable)]
-//! struct Record<'a> { values: &'a [std::cell::Cell<u8>] }
+//! #[datarc::record]
+//! struct Record { values: [std::cell::Cell<u8>] }
 //! fn require_sync<T: Sync>() {}
-//! require_sync::<RecordPacked>();
+//! require_sync::<Record>();
 //! ```
 //!
 //! An accessor cannot outlive its handle.
 //! ```compile_fail
-//! use datarc::Packable;
-//! #[derive(Packable)]
-//! struct Record<'a> { values: &'a [u8] }
-//! let values = { let record = RecordPacked::new(vec![1]); record.values() };
+//! #[datarc::record]
+//! struct Record { values: [u8] }
+//! let values = { let record = Record::new(vec![1]); record.values() };
 //! assert_eq!(values, &[1]);
 //! ```
 //!
 //! Borrowed array elements cannot outlive their source.
 //! ```compile_fail
-//! use datarc::Packable;
-//! #[derive(Packable)]
-//! struct Record<'view, 'data> { values: &'view [&'data str] }
-//! let record = { let text = String::from("hello"); RecordPacked::new(vec![text.as_str()]) };
+//! #[datarc::record]
+//! struct Record<'data> { values: [&'data str] }
+//! let record = { let text = String::from("hello"); Record::new(vec![text.as_str()]) };
 //! assert_eq!(record.values(), &["hello"]);
 //! ```
 //!
 //! Private fields generate private accessors.
 //! ```compile_fail
-//! use datarc::Packable;
 //! mod inner {
-//!     use super::*;
-//!     #[derive(Packable)]
-//!     pub struct Record<'a> { value: &'a u8 }
+//!     #[datarc::record]
+//!     pub struct Record { value: u8 }
 //! }
-//! let record = inner::RecordPacked::new(1);
+//! let record = inner::Record::new(1);
 //! let _ = record.value();
 //! ```
 //!
 //! Iterators with unknown lengths require explicit collection first.
 //! ```compile_fail
-//! use datarc::Packable;
-//! #[derive(Packable)]
-//! struct Record<'a> { values: &'a [u8] }
-//! let _ = RecordPacked::new((0..10).filter(|n| n % 2 == 0));
-//! ```
-//!
-//! The derive preserves ownership and borrowing for non-Clone data, but it does
-//! not enable a cloning conversion for such referents.
-//! ```compile_fail
-//! use datarc::Packable;
-//! struct NotClone;
-//! #[derive(Packable)]
-//! struct View<'a> { value: &'a NotClone }
-//! let value = NotClone;
-//! let _ = ViewPacked::from(View { value: &value });
-//! ```
-//!
-//! Slice elements must also be Clone to copy a view into an owner.
-//! ```compile_fail
-//! use datarc::Packable;
-//! struct NotClone;
-//! #[derive(Packable)]
-//! struct View<'a> { values: &'a [NotClone] }
-//! let values = [NotClone];
-//! let _ = ViewPacked::from(&View { values: &values });
-//! ```
-//!
-//! A derived borrowed view cannot outlive the owner that lends its references.
-//! ```compile_fail
-//! use datarc::Packable;
-//! #[derive(Packable)]
-//! struct View<'a> { values: &'a [u32] }
-//! let view = { let owner = ViewPacked::new([1, 2]); View::from(&owner) };
-//! assert_eq!(view.values, &[1, 2]);
+//! #[datarc::record]
+//! struct Record { values: [u8] }
+//! let _ = Record::new((0..10).filter(|n| n % 2 == 0));
 //! ```
 //!
 //! Stored references retain their own payload lifetime in the generated owner.
 //! ```compile_fail
-//! use datarc::Packable;
-//! #[derive(Packable)]
-//! struct View<'view, 'data> { text: &'view &'data str }
-//! let owner = { let text = String::from("payload"); ViewPacked::new(text.as_str()) };
-//! assert_eq!(*View::from(&owner).text, "payload");
+//! #[datarc::record]
+//! struct Record<'data> { text: &'data str }
+//! let owner = { let text = String::from("payload"); Record::new(text.as_str()) };
+//! assert_eq!(*owner.text(), "payload");
 //! ```
 //!
 //! Custom permanent allocation requires the caller to uphold an unsafe contract.
 //! ```compile_fail
-//! use datarc::Packable;
-//! #[derive(Packable)]
-//! struct View<'a> { value: &'a u32 }
-//! let _ = ViewPacked::new_static(|_| std::ptr::null_mut(), 1);
+//! #[datarc::record]
+//! struct Record { value: u32 }
+//! let _ = Record::new_static(|_| std::ptr::null_mut(), 1);
 //! ```
 //!
 //! Permanent storage does not extend lifetimes of borrowed payloads.
 //! ```compile_fail
-//! use datarc::Packable;
-//! #[derive(Packable)]
-//! struct View<'view, 'data> { text: &'view &'data str }
+//! #[datarc::record]
+//! struct Record<'data> { text: &'data str }
 //! let owner = {
 //!     let text = String::from("payload");
-//!     unsafe { ViewPacked::new_static(|layout| std::alloc::alloc(layout), text.as_str()) }
+//!     unsafe { Record::new_static(|layout| std::alloc::alloc(layout), text.as_str()) }
 //! };
-//! assert_eq!(*View::from(&owner).text, "payload");
+//! assert_eq!(*owner.text(), "payload");
 //! ```
-
 //!
 //! Packed owners retain non-Send payload restrictions.
 //! ```compile_fail
 //! use datarc::Packable;
+//! #[datarc::record]
+//! struct Record { value: std::rc::Rc<u8> }
 //! #[derive(Packable)]
-//! struct Record<'a> { value: &'a std::rc::Rc<u8> }
-//! #[derive(Packable)]
-//! enum Value { Record(RecordPacked) }
+//! enum Value { Record(Record) }
 //! fn send<T: Send>() {}
 //! send::<ValuePacked>();
 //! ```
@@ -146,10 +103,10 @@
 //! Packed owners retain non-Sync payload restrictions.
 //! ```compile_fail
 //! use datarc::Packable;
+//! #[datarc::record]
+//! struct Record { value: std::cell::Cell<u8> }
 //! #[derive(Packable)]
-//! struct Record<'a> { value: &'a std::cell::Cell<u8> }
-//! #[derive(Packable)]
-//! enum Value { Record(RecordPacked) }
+//! enum Value { Record(Record) }
 //! fn sync<T: Sync>() {}
 //! sync::<ValuePacked>();
 //! ```
@@ -157,11 +114,11 @@
 //! Borrowed inspection cannot return references into its temporary enum.
 //! ```compile_fail
 //! use datarc::Packable;
+//! #[datarc::record]
+//! struct Record { value: u32 }
 //! #[derive(Packable)]
-//! struct Record<'a> { value: &'a u32 }
-//! #[derive(Packable)]
-//! enum Value { Record(RecordPacked) }
-//! let packed = ValuePacked::from(Value::Record(RecordPacked::new(1)));
+//! enum Value { Record(Record) }
+//! let packed = ValuePacked::from(Value::Record(Record::new(1)));
 //! let borrowed = packed.with_enum(|value| match value {
 //!     Value::Record(owner) => owner.value(),
 //! });
@@ -171,13 +128,13 @@
 //! Packed owners preserve the lifetime of borrowed payloads.
 //! ```compile_fail
 //! use datarc::Packable;
+//! #[datarc::record]
+//! struct Record<'data> { value: &'data str }
 //! #[derive(Packable)]
-//! struct Record<'v, 'data> { value: &'v &'data str }
-//! #[derive(Packable)]
-//! enum Value<'data> { Record(RecordPacked<'data>) }
+//! enum Value<'data> { Record(Record<'data>) }
 //! let packed = {
 //!     let text = String::from("borrowed");
-//!     ValuePacked::from(Value::Record(RecordPacked::new(text.as_str())))
+//!     ValuePacked::from(Value::Record(Record::new(text.as_str())))
 //! };
 //! drop(packed);
 //! ```
@@ -188,26 +145,25 @@
 //! #[derive(Packable)]
 //! enum Value { Byte(Box<u8>) }
 //! ```
-
 //!
-//! Hash caching requires the view to implement Hash.
+//! Hash caching requires each field to implement Hash.
 //! ```compile_fail
-//! use datarc::Packable;
-//! #[derive(Packable)]
+//! struct NotHash;
+//! #[datarc::record]
 //! #[datarc(hash)]
-//! struct View<'a> { value: &'a u32 }
-//! let _ = ViewPacked::new(42);
+//! struct Record { value: NotHash }
+//! let _ = Record::new(NotHash);
 //! ```
 //!
 //! A custom hasher must implement Hasher and Default.
 //! ```compile_fail
-//! use datarc::Packable;
 //! #[derive(Default)]
 //! struct NotAHasher;
-//! #[derive(Packable, Hash)]
+//! #[datarc::record]
+//! #[derive(Hash)]
 //! #[datarc(hash, hasher = NotAHasher)]
-//! struct View<'a> { value: &'a u32 }
-//! let _ = ViewPacked::new(42);
+//! struct Record { value: u32 }
+//! let _ = Record::new(42);
 //! ```
 //!
 //! Unions cannot derive Packable.
@@ -217,78 +173,77 @@
 //! union Value { byte: u8, word: u32 }
 //! ```
 //!
-//! Owners do not gain Debug when the view lacks it.
+//! Owners do not gain Debug without an explicit derive.
 //! ```compile_fail
-//! use datarc::Packable;
-//! #[derive(Packable)]
-//! struct View<'a> { value: &'a u32 }
+//! #[datarc::record]
+//! struct Record { value: u32 }
 //! fn require<T: std::fmt::Debug>() {}
-//! require::<ViewPacked>();
+//! require::<Record>();
 //! ```
 //!
-//! Owners do not gain PartialEq when the view lacks it.
+//! Owners do not gain PartialEq without an explicit derive.
 //! ```compile_fail
-//! use datarc::Packable;
-//! #[derive(Packable)]
-//! struct View<'a> { value: &'a u32 }
+//! #[datarc::record]
+//! struct Record { value: u32 }
 //! fn require<T: PartialEq>() {}
-//! require::<ViewPacked>();
+//! require::<Record>();
 //! ```
 //!
-//! Pointer-shortcut equality requires Eq, even when the view has PartialEq.
+//! Pointer-shortcut equality requires Eq, even when the record has PartialEq.
 //! ```compile_fail
-//! use datarc::Packable;
-//! #[derive(Packable, PartialEq)]
+//! #[datarc::record]
+//! #[derive(PartialEq)]
 //! #[datarc(eq(ptr_eq))]
-//! struct View<'a> { value: &'a f64 }
-//! let owner = ViewPacked::new(f64::NAN);
+//! struct Record { value: f64 }
+//! let owner = Record::new(f64::NAN);
 //! let _ = owner == owner.clone();
 //! ```
 //!
 //! Conditional ordering also requires Eq when pointer equality is enabled.
 //! ```compile_fail
-//! use datarc::Packable;
-//! #[derive(Packable, PartialEq, PartialOrd)]
+//! #[datarc::record]
+//! #[derive(PartialEq, PartialOrd)]
 //! #[datarc(eq(ptr_eq))]
-//! struct View<'a, T> { value: &'a T }
-//! let owner = ViewPacked::new(f64::NAN);
+//! struct Record<T> { value: T }
+//! let owner = Record::new(f64::NAN);
 //! let _ = owner.partial_cmp(&owner);
 //! ```
 //!
 //! PartialEq alone does not enable Eq on the owner.
 //! ```compile_fail
-//! use datarc::Packable;
-//! #[derive(Packable, PartialEq)]
-//! struct View<'a> { value: &'a u32 }
+//! #[datarc::record]
+//! #[derive(PartialEq)]
+//! struct Record { value: u32 }
 //! fn require<T: Eq>() {}
-//! require::<ViewPacked>();
+//! require::<Record>();
 //! ```
 //!
 //! Equality does not enable PartialOrd on the owner.
 //! ```compile_fail
-//! use datarc::Packable;
-//! #[derive(Packable, PartialEq, Eq)]
-//! struct View<'a> { value: &'a u32 }
+//! #[datarc::record]
+//! #[derive(PartialEq, Eq)]
+//! struct Record { value: u32 }
 //! fn require<T: PartialOrd>() {}
-//! require::<ViewPacked>();
+//! require::<Record>();
 //! ```
 //!
 //! PartialOrd does not enable Ord on the owner.
 //! ```compile_fail
-//! use datarc::Packable;
-//! #[derive(Packable, PartialEq, Eq, PartialOrd)]
-//! struct View<'a> { value: &'a u32 }
+//! #[datarc::record]
+//! #[derive(PartialEq, Eq, PartialOrd)]
+//! struct Record { value: u32 }
 //! fn require<T: Ord>() {}
-//! require::<ViewPacked>();
+//! require::<Record>();
 //! ```
 //!
 //! Packed enums also require the original enum to implement the trait.
 //! ```compile_fail
 //! use datarc::Packable;
-//! #[derive(Packable, Debug)]
-//! struct View<'a> { value: &'a u32 }
+//! #[datarc::record]
+//! #[derive(Debug)]
+//! struct Record { value: u32 }
 //! #[derive(Packable)]
-//! enum Value { View(ViewPacked) }
+//! enum Value { Record(Record) }
 //! fn require<T: std::fmt::Debug>() {}
 //! require::<ValuePacked>();
 //! ```

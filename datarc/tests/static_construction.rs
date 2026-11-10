@@ -1,6 +1,5 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use datarc::Packable;
 use std::alloc::Layout;
 use std::cell::{Cell, UnsafeCell};
 use std::mem::MaybeUninit;
@@ -54,13 +53,13 @@ impl Drop for Probe {
 #[repr(align(128))]
 struct Aligned(u8);
 
-#[derive(Packable)]
-struct Record<'a> {
-    fixed: &'a Probe,
+#[datarc::record]
+struct Record {
+    fixed: Probe,
     #[datarc(len = u16)]
-    values: &'a [Probe],
+    values: [Probe],
     #[datarc(len = u8)]
-    aligned: &'a [Aligned],
+    aligned: [Aligned],
 }
 
 /// Checks that static and counted records use the same owner type, preserve alignment,
@@ -74,7 +73,7 @@ fn static_records_mix_with_counted_records_and_never_drop_their_contents() {
     let token = String::from("FnOnce allocator");
     // SAFETY: the arena supplies a unique properly aligned permanent region.
     let permanent = unsafe {
-        RecordPacked::new_static(
+        Record::new_static(
             |layout| {
                 drop(token);
                 calls.set(calls.get() + 1);
@@ -90,19 +89,20 @@ fn static_records_mix_with_counted_records_and_never_drop_their_contents() {
         std::mem::size_of_val(&permanent),
         std::mem::size_of::<usize>()
     );
-    let view = Record::from(&permanent);
-    assert!(std::ptr::eq(view.fixed, permanent.fixed()));
-    assert_eq!(view.values.len(), 2);
-    assert_eq!(view.aligned[0].0, 7);
-    assert_eq!(view.aligned[1].0, 8);
-    assert_eq!(view.aligned.as_ptr() as usize % 128, 0);
+    let shared = permanent.clone();
+    assert!(std::ptr::eq(shared.fixed(), permanent.fixed()));
+    assert_eq!(permanent.values().len(), 2);
+    assert_eq!(permanent.aligned()[0].0, 7);
+    assert_eq!(permanent.aligned()[1].0, 8);
+    assert_eq!(permanent.aligned().as_ptr() as usize % 128, 0);
+    drop(shared);
     // SAFETY: new_static has completed header initialization.
     assert_eq!(unsafe { ARENA.count() }, usize::MAX);
     for _ in 0..32 {
         drop(permanent.clone());
     }
-    let ordinary = RecordPacked::new(Probe(&NORMAL_DROPS), [Probe(&NORMAL_DROPS)], []);
-    let mixed: [RecordPacked; 2] = [ordinary, permanent.clone()];
+    let ordinary = Record::new(Probe(&NORMAL_DROPS), [Probe(&NORMAL_DROPS)], []);
+    let mixed: [Record; 2] = [ordinary, permanent.clone()];
     drop(mixed);
     assert_eq!(NORMAL_DROPS.load(Ordering::Relaxed), 2);
     drop(permanent);
@@ -119,7 +119,7 @@ fn concurrent_static_clones_and_drops_leave_the_sentinel_unchanged() {
     static DROPS: AtomicUsize = AtomicUsize::new(0);
     // SAFETY: this arena is used exactly once and lives for the whole process.
     let owner =
-        unsafe { RecordPacked::new_static(|layout| ARENA.allocate(layout), Probe(&DROPS), [], []) };
+        unsafe { Record::new_static(|layout| ARENA.allocate(layout), Probe(&DROPS), [], []) };
     std::thread::scope(|scope| {
         for _ in 0..4 {
             scope.spawn(|| {
@@ -180,13 +180,13 @@ fn failed_initialization_drops_values_without_deallocating_static_storage() {
             // SAFETY: each case claims its own permanent, aligned arena once.
             unsafe {
                 match case {
-                    0 => RecordPacked::new_static(
+                    0 => Record::new_static(
                         |layout| arena.allocate(layout),
                         Probe(&DROPS),
                         Short([Probe(&DROPS), Probe(&DROPS)].into_iter()),
                         [],
                     ),
-                    1 => RecordPacked::new_static(
+                    1 => Record::new_static(
                         |layout| arena.allocate(layout),
                         Probe(&DROPS),
                         (0..3).map(|i| {
@@ -195,7 +195,7 @@ fn failed_initialization_drops_values_without_deallocating_static_storage() {
                         }),
                         [],
                     ),
-                    _ => RecordPacked::new_static(
+                    _ => Record::new_static(
                         |layout| arena.allocate(layout),
                         Probe(&DROPS),
                         DropPanic([Probe(&DROPS), Probe(&DROPS)].into_iter()),
@@ -220,7 +220,7 @@ fn lengths_are_validated_before_calling_the_allocator() {
         // SAFETY: the allocator never returns a region; validation must reject
         // the oversized field before calling it.
         unsafe {
-            RecordPacked::new_static(
+            Record::new_static(
                 |_| {
                     called.set(true);
                     panic!("allocator must not be called")
@@ -236,12 +236,12 @@ fn lengths_are_validated_before_calling_the_allocator() {
     assert_eq!(DROPS.load(Ordering::Relaxed), 2);
 }
 
-#[derive(Packable)]
-struct Fixed<'a> {
-    value: &'a u64,
+#[datarc::record]
+struct Fixed {
+    value: u64,
 }
 
-#[derive(Packable)]
+#[datarc::record]
 struct Empty {}
 
 /// Checks static construction and field access for fixed-only records and construction
@@ -251,20 +251,20 @@ fn fixed_only_and_empty_records_support_static_allocation() {
     static FIXED: Arena = Arena::new();
     static EMPTY: Arena = Arena::new();
     // SAFETY: both arenas provide independent permanent regions exactly once.
-    let fixed = unsafe { FixedPacked::new_static(|layout| FIXED.allocate(layout), 9) };
+    let fixed = unsafe { Fixed::new_static(|layout| FIXED.allocate(layout), 9) };
     assert_eq!(*fixed.value(), 9);
     // SAFETY: EMPTY is independent of FIXED and has not been claimed.
-    let empty = unsafe { EmptyPacked::new_static(|layout| EMPTY.allocate(layout)) };
+    let empty = unsafe { Empty::new_static(|layout| EMPTY.allocate(layout)) };
     drop((fixed, empty));
 }
 
-#[derive(Packable)]
-struct Generic<'view, 'data, T, const N: usize> {
-    data: &'view &'data [u8; N],
-    values: &'view [T],
-    __datarc_allocator: &'view bool,
-    __datarc_static: &'view u32,
-    __datarc_construct: &'view u8,
+#[datarc::record]
+struct Generic<'data, T, const N: usize> {
+    data: &'data [u8; N],
+    values: [T],
+    __datarc_allocator: bool,
+    __datarc_static: u32,
+    __datarc_construct: u8,
 }
 
 /// Checks static construction with type and const generics, borrowed payloads, and
@@ -277,7 +277,7 @@ fn generics_payload_lifetimes_and_internal_looking_names_work() {
     // SAFETY: the allocation is permanent; the owner retains the source's
     // payload lifetime, so source data is borrowed only while it is live.
     let owner = unsafe {
-        GenericPacked::new_static(
+        Generic::new_static(
             |layout| ARENA.allocate(layout),
             &source,
             [Probe(&DROPS)],
@@ -286,7 +286,7 @@ fn generics_payload_lifetimes_and_internal_looking_names_work() {
             8,
         )
     };
-    assert_eq!(Generic::from(&owner).data, &&[1, 2]);
+    assert_eq!(owner.data(), &&[1, 2]);
     assert_eq!(owner.values().len(), 1);
     assert!(*owner.__datarc_allocator());
     assert_eq!(*owner.__datarc_static(), 7);

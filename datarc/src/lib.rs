@@ -3,9 +3,9 @@
 
 extern crate self as datarc;
 
-pub use datarc_macros::Packable;
+pub use datarc_macros::{record, Packable};
 
-/// Associates a borrowed record or an enum of shared pointers with its packed owner.
+/// Associates an enum of shared pointers with its packed owner.
 ///
 /// The derive generates standard `From` conversions. Generic callers can require
 /// the conversion bounds they need in addition to this type association.
@@ -18,7 +18,7 @@ mod compile_checks;
 
 /// An owning, thin pointer that can be stored in a packed enum.
 ///
-/// Generated `Packable` struct owners implement this trait automatically.
+/// Generated `record` owners implement this trait automatically.
 ///
 /// # Safety
 /// `into_raw` must transfer one ownership unit to a non-null pointer whose address
@@ -90,34 +90,6 @@ pub mod __private {
     use std::sync::atomic::{fence, AtomicUsize, Ordering};
 
     const STATIC_REFCOUNT: usize = usize::MAX;
-
-    // Lifetime-dependent bounds on these helpers allow the derive to generate
-    // conditional conversions even for concrete, non-Clone referent types.
-    pub trait CloneValue {
-        type Value;
-        fn clone_value(self) -> Self::Value;
-    }
-
-    impl<T: Clone> CloneValue for &T {
-        type Value = T;
-        fn clone_value(self) -> T {
-            T::clone(self)
-        }
-    }
-
-    pub trait CloneItems {
-        type Item;
-        type Iter: ExactSizeIterator<Item = Self::Item>;
-        fn clone_items(self) -> Self::Iter;
-    }
-
-    impl<'a, T: Clone> CloneItems for &'a [T] {
-        type Item = T;
-        type Iter = std::iter::Cloned<std::slice::Iter<'a, T>>;
-        fn clone_items(self) -> Self::Iter {
-            self.iter().cloned()
-        }
-    }
 
     /// Its atomic is private so safe code cannot corrupt a live reference count.
     #[repr(transparent)]

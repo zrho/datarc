@@ -111,7 +111,7 @@ pub(super) fn expand(item: ItemEnum) -> syn::Result<TokenStream> {
         .predicates
         .push(syn::parse_quote!(#name #args: ::std::marker::Sync));
     let (sync_imp, _, sync_bounds) = sync_generics.split_for_impl();
-    let borrow = super::derive::fresh_lifetime(&generics, "__datarc_trait");
+    let borrow = super::traits::fresh_lifetime(&generics, "__datarc_trait");
     let trait_impls = super::traits::expand(
         &packed,
         &generics,

@@ -1,4 +1,3 @@
-use datarc::Packable;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::collections::hash_map::DefaultHasher;
@@ -53,47 +52,43 @@ fn hash_with<H: Hasher + Default>(value: &impl Hash) -> u64 {
     hasher.finish()
 }
 
-#[derive(Packable, Hash)]
+#[datarc::record]
+#[derive(Hash)]
 #[datarc(hash)]
-struct Record<'a> {
-    id: &'a u64,
+struct Record {
+    id: u64,
     #[datarc(len = u8)]
-    values: &'a [i32],
+    values: [i32],
 }
 
-/// Checks that constructors and view conversions cache the borrowed view hash computed
-/// with DefaultHasher, including empty slices.
+/// Checks that constructors cache the field hash with DefaultHasher, including empty slices.
 #[test]
-fn default_hasher_matches_borrowed_view_for_constructors_and_conversions() {
+fn default_hasher_matches_fields_for_constructors() {
     let id = 42;
     let values = [3, -7, 11];
-    let view = Record {
-        id: &id,
-        values: &values,
-    };
-    let expected = hash_with::<DefaultHasher>(&view);
+    let expected = hash_with::<DefaultHasher>(&(id, values.as_slice()));
     let owners = [
-        RecordPacked::new(id, values),
-        RecordPacked::try_new(id, values).unwrap(),
-        RecordPacked::from(&view),
-        RecordPacked::from(view),
+        Record::new(id, values),
+        Record::try_new(id, values).unwrap(),
     ];
     for owner in owners {
         let cached: u64 = owner.cached_hash();
         assert_eq!(cached, expected);
-        assert_eq!(cached, hash_with::<DefaultHasher>(&Record::from(&owner)));
+        assert_eq!(
+            cached,
+            hash_with::<DefaultHasher>(&(owner.id(), owner.values()))
+        );
         assert_eq!(owner.clone().cached_hash(), expected);
         assert_eq!(std::mem::size_of_val(&owner), std::mem::size_of::<usize>());
     }
-    let empty = RecordPacked::new(0, []);
+    let empty = Record::new(0, []);
     assert_eq!(
         empty.cached_hash(),
-        hash_with::<DefaultHasher>(&Record::from(&empty))
+        hash_with::<DefaultHasher>(&(empty.id(), empty.values()))
     );
 }
 
-// This payload deliberately does not implement Hash. Only the view's manual
-// implementation determines which data contributes to the cached hash.
+// Field hashing defines which payload data contributes to the cache.
 #[derive(Clone)]
 struct Payload {
     key: u64,
@@ -115,26 +110,23 @@ impl Hasher for CustomHasher {
     }
 }
 
-#[derive(Packable)]
+#[datarc::record]
+#[derive(Hash)]
 #[datarc(hash, hasher = CustomHasher)]
-struct Manual<'a> {
-    payload: &'a Payload,
-    values: &'a [u32],
+struct Manual {
+    payload: Payload,
+    values: [u32],
 }
 
-impl Hash for Manual<'_> {
+impl Hash for Payload {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.payload.calls.fetch_add(1, Ordering::SeqCst);
-        "manual view hash".hash(state);
-        self.payload.key.hash(state);
-        for value in self.values.iter().rev() {
-            value.hash(state);
-        }
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        "manual payload hash".hash(state);
+        self.key.hash(state);
     }
 }
 
-/// Checks that a manual view hash and custom hasher run once per allocation, and owner
-/// hashing uses only the cached value.
+/// Checks that custom field hashing runs once per allocation and owner hashing uses the cache.
 #[test]
 fn custom_manual_hash_runs_once_per_allocation_and_never_on_clone_or_access() {
     let calls = Arc::new(AtomicUsize::new(0));
@@ -143,23 +135,15 @@ fn custom_manual_hash_runs_once_per_allocation_and_never_on_clone_or_access() {
         calls: calls.clone(),
     };
     let values = [8, 13, 21];
-    let view = Manual {
-        payload: &payload,
-        values: &values,
-    };
-    let expected = hash_with::<CustomHasher>(&view);
+    let expected = hash_with::<CustomHasher>(&(&payload, values.as_slice()));
     calls.store(0, Ordering::SeqCst);
 
-    let first = ManualPacked::new(payload.clone(), values);
+    let first = Manual::new(payload.clone(), values);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let second = ManualPacked::try_new(payload.clone(), values).unwrap();
+    let second = Manual::try_new(payload.clone(), values).unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 2);
-    let third = ManualPacked::from(&view);
-    assert_eq!(calls.load(Ordering::SeqCst), 3);
-    let fourth = ManualPacked::from(view);
-    assert_eq!(calls.load(Ordering::SeqCst), 4);
 
-    for owner in [first, second, third, fourth] {
+    for owner in [first, second] {
         let shared = owner.clone();
         let another = shared.clone();
         for _ in 0..3 {
@@ -174,12 +158,12 @@ fn custom_manual_hash_runs_once_per_allocation_and_never_on_clone_or_access() {
                 hash_with::<CustomHasher>(&shared),
                 hash_with::<CustomHasher>(&expected)
             );
-            assert_eq!(Manual::from(&shared).values, &values);
+            assert_eq!(shared.values(), &values);
         }
         drop(owner);
         assert_eq!(shared.cached_hash(), expected);
     }
-    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
 /// Checks that static construction computes the hash once and immortal owner clones
@@ -191,15 +175,11 @@ fn static_construction_hashes_once_and_static_clones_preserve_cache() {
         key: 5,
         calls: calls.clone(),
     };
-    let expected = hash_with::<CustomHasher>(&Manual {
-        payload: &payload,
-        values: &[2, 4],
-    });
+    let expected = hash_with::<CustomHasher>(&(&payload, [2u32, 4].as_slice()));
     calls.store(0, Ordering::SeqCst);
     // SAFETY: the callback supplies fresh aligned storage which is deliberately
     // retained for the rest of the process, as required by new_static.
-    let owner =
-        unsafe { ManualPacked::new_static(|layout| std::alloc::alloc(layout), payload, [2, 4]) };
+    let owner = unsafe { Manual::new_static(|layout| std::alloc::alloc(layout), payload, [2, 4]) };
     let shared = owner.clone();
     assert_eq!(owner.cached_hash(), expected);
     assert_eq!(shared.cached_hash(), expected);
@@ -220,30 +200,21 @@ impl Drop for DropProbe {
     }
 }
 
-#[derive(Packable)]
+#[datarc::record]
 #[datarc(hash)]
-struct PanickingHash<'a> {
-    fixed: &'a DropProbe,
-    first: &'a [DropProbe],
-    second: &'a [DropProbe],
+struct PanickingHash {
+    fixed: DropProbe,
+    first: [DropProbe],
+    second: [DropProbe],
 }
 
-impl Hash for PanickingHash<'_> {
+impl Hash for DropProbe {
     fn hash<H: Hasher>(&self, _: &mut H) {
-        // Hash must see all fields and both fully initialized tails.
-        assert_eq!(self.fixed.index, 0);
-        assert_eq!(
-            self.first.iter().map(|p| p.index).collect::<Vec<_>>(),
-            [1, 2]
-        );
-        assert_eq!(
-            self.second.iter().map(|p| p.index).collect::<Vec<_>>(),
-            [3, 4, 5]
-        );
-        for count in self.fixed.drops.iter() {
+        assert_eq!(self.index, 0);
+        for count in self.drops.iter() {
             assert_eq!(count.load(Ordering::SeqCst), 0);
         }
-        panic!("view hash panicked");
+        panic!("field hash panicked");
     }
 }
 
@@ -264,7 +235,7 @@ fn check_hash_panic_cleanup(static_storage: bool, fallible: bool) {
             // SAFETY: the callback supplies fresh aligned storage. On failure,
             // the caller retains this storage and frees it after all cleanup.
             unsafe {
-                PanickingHashPacked::new_static(
+                PanickingHash::new_static(
                     |layout| {
                         WATCH_NEXT_ALLOCATION.with(|watch| watch.set(true));
                         let ptr = std::alloc::alloc(layout);
@@ -279,15 +250,15 @@ fn check_hash_panic_cleanup(static_storage: bool, fallible: bool) {
         } else {
             WATCH_NEXT_ALLOCATION.with(|watch| watch.set(true));
             if fallible {
-                let _ = PanickingHashPacked::try_new(fixed, first, second);
+                let _ = PanickingHash::try_new(fixed, first, second);
             } else {
-                let _ = PanickingHashPacked::new(fixed, first, second);
+                let _ = PanickingHash::new(fixed, first, second);
             }
         }
     }));
     WATCH_NEXT_ALLOCATION.with(|watch| watch.set(false));
-    let panic = result.expect_err("the view hash must panic");
-    assert_eq!(panic.downcast_ref::<&str>(), Some(&"view hash panicked"));
+    let panic = result.expect_err("the field hash must panic");
+    assert_eq!(panic.downcast_ref::<&str>(), Some(&"field hash panicked"));
     for (index, count) in drops.iter().enumerate() {
         assert_eq!(
             count.load(Ordering::SeqCst),
@@ -311,7 +282,7 @@ fn check_hash_panic_cleanup(static_storage: bool, fallible: bool) {
     WATCHED_ALLOCATION.with(|watched| watched.set(std::ptr::null_mut()));
 }
 
-/// Checks that a view-hashing panic in new or try_new drops all initialized values and
+/// Checks that a field-hashing panic in new or try_new drops all initialized values and
 /// frees the ordinary allocation.
 #[test]
 fn hashing_panic_drops_fields_and_tails_and_frees_normal_allocation() {
@@ -319,19 +290,20 @@ fn hashing_panic_drops_fields_and_tails_and_frees_normal_allocation() {
     check_hash_panic_cleanup(false, true);
 }
 
-/// Checks that a view-hashing panic drops all initialized values but leaves
+/// Checks that a field-hashing panic drops all initialized values but leaves
 /// caller-provided static storage for the caller to free.
 #[test]
 fn hashing_panic_drops_fields_and_tails_without_freeing_static_allocation() {
     check_hash_panic_cleanup(true, false);
 }
 
-#[derive(Packable, Hash)]
+#[datarc::record]
+#[derive(Hash)]
 #[datarc(hash)]
-struct Generic<'a, 'data, T: Hash, const N: usize> {
-    label: &'a &'data str,
-    fixed: &'a [T; N],
-    values: &'a [T],
+struct Generic<'data, T: Hash, const N: usize> {
+    label: &'data str,
+    fixed: [T; N],
+    values: [T],
 }
 
 /// Checks cached hashing for records combining type and const generics, borrowed
@@ -339,15 +311,15 @@ struct Generic<'a, 'data, T: Hash, const N: usize> {
 #[test]
 fn cached_hash_preserves_type_const_and_payload_lifetime_generics() {
     let text = String::from("borrowed payload");
-    let owner = GenericPacked::<u16, 3>::new(text.as_str(), [1, 2, 3], [5, 8]);
-    let expected = hash_with::<DefaultHasher>(&Generic::from(&owner));
+    let owner = Generic::<u16, 3>::new(text.as_str(), [1, 2, 3], [5, 8]);
+    let expected = hash_with::<DefaultHasher>(&(owner.label(), owner.fixed(), owner.values()));
     assert_eq!(owner.cached_hash(), expected);
     let shared = owner.clone();
     assert_eq!(shared.cached_hash(), expected);
-    assert_eq!(*Generic::from(&shared).label, text.as_str());
-    let empty = GenericPacked::<u8, 0>::try_new(text.as_str(), [], []).unwrap();
+    assert_eq!(*shared.label(), text.as_str());
+    let empty = Generic::<u8, 0>::try_new(text.as_str(), [], []).unwrap();
     assert_eq!(
         empty.cached_hash(),
-        hash_with::<DefaultHasher>(&Generic::from(&empty))
+        hash_with::<DefaultHasher>(&(empty.label(), empty.fixed(), empty.values()))
     );
 }

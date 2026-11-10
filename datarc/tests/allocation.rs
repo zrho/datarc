@@ -1,6 +1,5 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use datarc::Packable;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
@@ -35,14 +34,13 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static ALLOCATOR: Counting = Counting;
 
-#[derive(Packable)]
-#[datarc(owned = Record)]
-struct RecordView<'view> {
-    id: &'view u64,
+#[datarc::record]
+struct Record {
+    id: u64,
     #[datarc(len = u8)]
-    bytes: &'view [u8],
+    bytes: [u8],
     #[datarc(len = u16)]
-    words: &'view [u64],
+    words: [u64],
 }
 
 /// Checks that construction uses one allocation and releases input buffers, while
@@ -122,30 +120,24 @@ fn count_mismatch_releases_the_partial_allocation() {
     assert_eq!(DEALLOCATIONS.with(Cell::get), 1);
 }
 
-#[derive(datarc::Packable)]
-struct View<'a> {
-    id: &'a u64,
-    bytes: &'a [u8],
+#[datarc::record]
+struct Simple {
+    id: u64,
+    bytes: [u8],
 }
 
-/// Checks that copying a view allocates once and all borrowed conversions reuse the
-/// same storage without further allocations.
+/// Checks that construction allocates once and getters and clones reuse storage.
 #[test]
-fn derived_view_cloning_allocates_once_and_borrowing_does_not_allocate() {
-    let id = 7;
-    let view = View {
-        id: &id,
-        bytes: &[1, 2, 3],
-    };
+fn record_construction_allocates_once_and_getters_do_not_allocate() {
     COUNT.with(|b| b.set(true));
-    let owner = ViewPacked::from(&view);
-    let borrowed = View::from(&owner);
-    let via_from: View<'_> = (&owner).into();
-    let via_trait = <View<'_> as From<&ViewPacked>>::from(&owner);
+    let owner = Simple::new(7, [1, 2, 3]);
+    let shared = owner.clone();
+    let id = owner.id();
+    let bytes = owner.bytes();
+    assert!(std::ptr::eq(bytes, shared.bytes()));
+    drop(shared);
     COUNT.with(|b| b.set(false));
-    assert_eq!(*borrowed.id, 7);
-    assert!(std::ptr::eq(borrowed.bytes, via_from.bytes));
-    assert!(std::ptr::eq(borrowed.bytes, via_trait.bytes));
+    assert_eq!(*id, 7);
     assert_eq!(ALLOCATIONS.with(Cell::get), 1);
     assert_eq!(DEALLOCATIONS.with(Cell::get), 0);
     COUNT.with(|b| b.set(true));

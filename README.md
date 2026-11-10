@@ -88,6 +88,37 @@ different cached hashes refute it. Remaining comparisons use field values.
 Shortcuts require deriving `PartialEq`. The pointer check runs first and requires
 field types to implement `Eq`. Ordering remains field-based.
 
+### Mutable fields
+
+Use `#[datarc(mut)]` on a field to generate a `name_mut(&mut self)` accessor.
+It returns `&mut T` for a value or `&mut [T]` for a sequence. A mutable slice
+permits element changes, but cannot change the sequence length. Combine options
+with `#[datarc(mut, len = u8)]` when needed.
+
+```rust
+#[datarc::record]
+struct Buffer {
+    #[datarc(mut)]
+    label: String,
+    #[datarc(mut, len = u8)]
+    bytes: [u8],
+}
+
+let mut buffer = Buffer::new(String::from("data"), [1, 2, 3]);
+let shared = buffer.clone();
+buffer.label_mut().push_str("!");
+buffer.bytes_mut()[0] = 9;
+assert_eq!(buffer.label(), "data!");
+assert_eq!(buffer.bytes(), &[9, 2, 3]);
+assert_eq!(shared.bytes(), &[1, 2, 3]);
+```
+
+Mutable accessors require every stored value type and sequence element type to
+implement `Clone`. Unique, non-static records mutate without copying. Shared or
+static records first copy all fields into a new allocation; other owners keep
+the original data. Owner cloning still shares storage. Mutable fields cannot
+be combined with cached hashing (`#[datarc(hash)]`).
+
 ### Array lengths
 
 Use `#[datarc(len = u8)]` on a `[T]` field to select a smaller stored length

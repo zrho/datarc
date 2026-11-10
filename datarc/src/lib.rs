@@ -159,6 +159,14 @@ pub mod __private {
         pub fn as_ptr(&self) -> *mut T {
             self.ptr.as_ptr()
         }
+
+        /// Return whether this is the only owner of non-static storage.
+        pub fn is_unique(&mut self) -> bool {
+            // There are no weak owners. With an exclusive owner borrow, no new
+            // owner can be created once the count reaches one. Acquire pairs
+            // with other owners' release drops before mutation can start.
+            self.get().ref_count().0.load(Ordering::Acquire) == 1
+        }
     }
 
     impl<T: Storage> Clone for Shared<T> {

@@ -38,10 +38,11 @@ struct Field {
     vis: syn::Visibility,
     attrs: Vec<syn::Attribute>,
     length: Option<Type>,
+    mutable: bool,
     slot: Index,
 }
 
-fn field_options(field: &syn::Field) -> syn::Result<(Type, Option<Type>)> {
+fn field_options(field: &syn::Field) -> syn::Result<(Type, Option<Type>, bool)> {
     // Parentheses and invisible groups do not change whether a type is a slice.
     let mut declared_type = &field.ty;
     loop {
@@ -56,6 +57,7 @@ fn field_options(field: &syn::Field) -> syn::Result<(Type, Option<Type>)> {
         _ => None,
     };
     let mut length = None;
+    let mut mutable = false;
     for attr in &field.attrs {
         if !attr.path().is_ident("datarc") {
             check_attr(attr)?;
@@ -83,22 +85,31 @@ fn field_options(field: &syn::Field) -> syn::Result<(Type, Option<Type>)> {
                     ));
                 }
                 length = Some(ty);
+            } else if meta.path.is_ident("mut") {
+                if mutable {
+                    return Err(meta.error("specify `mut` only once"));
+                }
+                mutable = true;
             } else {
-                return Err(meta.error("expected `len = <unsigned integer type>`"));
+                return Err(meta.error("expected `len = <unsigned integer type>` or `mut`"));
             }
             Ok(())
         })?;
     }
     let ty = slice_element.unwrap_or(&field.ty).clone();
     if slice_element.is_some() {
-        Ok((ty, Some(length.unwrap_or_else(|| syn::parse_quote!(usize)))))
+        Ok((
+            ty,
+            Some(length.unwrap_or_else(|| syn::parse_quote!(usize))),
+            mutable,
+        ))
     } else if length.is_some() {
         Err(syn::Error::new(
             field.span(),
             "`len` requires a sequence field `[T]`",
         ))
     } else {
-        Ok((ty, None))
+        Ok((ty, None, mutable))
     }
 }
 
@@ -195,7 +206,7 @@ fn generate_owner(
                 "field name conflicts with a generated constructor",
             ));
         }
-        let (ty, length) = field_options(field)?;
+        let (ty, length, mutable) = field_options(field)?;
         let count = if length.is_some() {
             &mut many_count
         } else {
@@ -214,8 +225,19 @@ fn generate_owner(
                 .cloned()
                 .collect(),
             length,
+            mutable,
             slot,
         });
+    }
+
+    for field in fields.iter().filter(|f| f.mutable) {
+        let accessor = format_ident!("{}_mut", field.ident.unraw());
+        if fields.iter().any(|f| f.ident.unraw() == accessor) {
+            return Err(syn::Error::new(
+                field.ident.span(),
+                "mutable accessor name conflicts with a field getter",
+            ));
+        }
     }
 
     let runtime = runtime_path();
@@ -236,7 +258,10 @@ fn generate_owner(
         .collect();
     let fresh_ident = |stem: &str| {
         let mut candidate = traits::fresh_ident(generics, stem);
-        while fields.iter().any(|f| f.ident.unraw() == candidate.unraw()) {
+        while fields.iter().any(|f| {
+            f.ident.unraw() == candidate.unraw()
+                || (f.mutable && candidate.unraw() == format!("{}_mut", f.ident.unraw()))
+        }) {
             candidate = traits::fresh_ident(generics, &format!("{candidate}_"));
         }
         candidate
@@ -289,6 +314,7 @@ fn generate_owner(
             attrs,
             length,
             slot,
+            ..
         } = f;
         if length.is_none() {
             quote! {
@@ -335,6 +361,91 @@ fn generate_owner(
         }
     });
     let accessors = accessors.collect::<Vec<_>>();
+    let make_mut = fresh_ident("__datarc_make_mut");
+    let clone_types: Vec<_> = fields.iter().map(|f| &f.ty).collect();
+    let clone_inputs = fields.iter().map(|f| {
+        let ident = &f.ident;
+        if f.length.is_some() {
+            quote!(self.#ident().iter().cloned())
+        } else {
+            quote!(::std::clone::Clone::clone(self.#ident()))
+        }
+    });
+    let make_mut_method = fields.iter().any(|f| f.mutable).then(|| {
+        quote! {
+            #[inline]
+            fn #make_mut(&mut self)
+            where #(#clone_types: ::std::clone::Clone,)*
+            {
+                if !self.__datarc.is_unique() {
+                    // Build before replacing the owner so a clone panic leaves it unchanged.
+                    let __replacement = Self::new(#(#clone_inputs,)*);
+                    *self = __replacement;
+                }
+            }
+        }
+    });
+    let mutable_accessors = fields.iter().filter(|f| f.mutable).map(|f| {
+        let ident = format_ident!("{}_mut", f.ident.unraw());
+        let doc = format!("See [Self::{}].", f.ident);
+        let ty = &f.ty;
+        let vis = &f.vis;
+        let slot = &f.slot;
+        let deprecated = f.attrs.iter().filter(|a| a.path().is_ident("deprecated"));
+        if f.length.is_none() {
+            quote! {
+                #[doc = #doc]
+                #(#deprecated)*
+                #[inline]
+                #vis fn #ident(&mut self) -> &mut #ty
+                where #(#clone_types: ::std::clone::Clone,)*
+                {
+                    self.#make_mut();
+                    // SAFETY: make_mut ensures unique, non-static storage, and
+                    // this reference is tied to the exclusive owner borrow.
+                    unsafe { &mut (*self.__datarc.as_ptr()).__values.#slot }
+                }
+            }
+        } else {
+            let preceding_arrays = many.iter().take(slot.index as usize).map(|preceding| {
+                let ty = &preceding.ty;
+                let slot = &preceding.slot;
+                quote! {
+                    let __align = ::std::mem::align_of::<#ty>();
+                    let __offset = __offset.wrapping_add(__align - 1) & !(__align - 1);
+                    let __offset = __offset.wrapping_add(
+                        (__header.__lengths.#slot as usize)
+                            .wrapping_mul(::std::mem::size_of::<#ty>())
+                    );
+                }
+            });
+            quote! {
+                #[doc = #doc]
+                #(#deprecated)*
+                #[inline]
+                #vis fn #ident(&mut self) -> &mut [#ty]
+                where #(#clone_types: ::std::clone::Clone,)*
+                {
+                    self.#make_mut();
+                    let __header = self.__datarc.get();
+                    let __offset = ::std::mem::size_of::<#storage #ty_generics>();
+                    #(#preceding_arrays)*
+                    let __align = ::std::mem::align_of::<#ty>();
+                    let __offset = __offset.wrapping_add(__align - 1) & !(__align - 1);
+                    let __length = __header.__lengths.#slot as usize;
+                    // SAFETY: construction validated the offset and immutable
+                    // length. make_mut ensures exclusive, non-static storage;
+                    // the slice borrow prevents access through this owner.
+                    unsafe {
+                        ::std::slice::from_raw_parts_mut(
+                            self.__datarc.as_ptr().cast::<u8>().add(__offset).cast::<#ty>(),
+                            __length,
+                        )
+                    }
+                }
+            }
+        }
+    });
     let offset_names: Vec<_> = (0..many_count)
         .map(|i| format_ident!("__datarc_offset_{i}"))
         .collect();
@@ -533,7 +644,9 @@ fn generate_owner(
             }
 
             #hash_accessor
+            #make_mut_method
             #(#accessors)*
+            #(#mutable_accessors)*
         }
 
         // SAFETY: Shared transfers one strong unit; the storage header has

@@ -119,7 +119,13 @@ pub(super) fn expand(args: TokenStream, mut item: ItemStruct) -> syn::Result<Tok
         .named
         .iter()
         .map(|f| {
-            let (ty, length) = super::field_options(f)?;
+            let (ty, length, mutable) = super::field_options(f)?;
+            if hash && mutable {
+                return Err(syn::Error::new(
+                    f.span(),
+                    "mutable fields cannot be combined with cached hashing",
+                ));
+            }
             Ok(if length.is_some() {
                 syn::parse_quote!([#ty])
             } else {

@@ -4,26 +4,62 @@ use std::sync::{
 };
 
 #[datarc::record]
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Record {
     pub id: u64,
+    #[datarc(mut, len = u16)]
+    pub text: str,
     #[datarc(len = u16)]
     pub values: [i32],
+    pub suffix: str,
 }
 
 /// Checks pointer-sized owners, direct construction, and shared storage.
 #[test]
 fn record_construction_and_shared_storage() {
-    let owner = Record::new(42, [1, 2, 3]);
+    let mut owner = Record::new(42, String::from("héllo"), [1, 2, 3], "");
     assert_eq!(std::mem::size_of::<Record>(), std::mem::size_of::<usize>());
     assert_eq!(*owner.id(), 42);
     assert_eq!(owner.values(), &[1, 2, 3]);
+    assert_eq!(owner.text(), "héllo");
+    assert_eq!(owner.suffix(), "");
     let shared = owner.clone();
     assert!(std::ptr::eq(shared.id(), owner.id()));
     assert!(std::ptr::eq(shared.values(), owner.values()));
-    let separate = Record::try_new(42, [1, 2, 3]).unwrap();
+    assert!(std::ptr::eq(shared.text(), owner.text()));
+    let separate = Record::try_new(42, "héllo", [1, 2, 3], "").unwrap();
+    assert_eq!(owner, separate);
+    assert_eq!(owner.cmp(&separate), std::cmp::Ordering::Equal);
+    assert!(format!("{owner:?}").contains("héllo"));
     assert!(!std::ptr::eq(separate.values(), owner.values()));
     assert_eq!(separate.values(), owner.values());
+    owner.text_mut().make_ascii_uppercase();
+    assert_eq!(owner.text(), "HéLLO");
+    assert_eq!(shared.text(), "héllo");
+    assert_eq!(owner.values(), shared.values());
+    assert!(!owner.ptr_eq(&shared));
+    let address = owner.text().as_ptr();
+    owner.text_mut().make_ascii_lowercase();
+    assert_eq!(owner.text().as_ptr(), address);
+    assert_eq!(owner.text(), "héllo");
+
+    // SAFETY: the allocation is unique, correctly aligned, and retained forever.
+    let mut permanent = unsafe {
+        Record::new_static(
+            |layout| std::alloc::alloc(layout),
+            42,
+            "héllo",
+            [1, 2, 3],
+            "!",
+        )
+    };
+    let shared_static = permanent.clone();
+    permanent.text_mut().make_ascii_uppercase();
+    assert_eq!(permanent.text(), "HéLLO");
+    assert_eq!(shared_static.text(), "héllo");
+    assert_eq!(permanent.suffix(), "!");
+    assert_eq!(permanent.values(), &[1, 2, 3]);
+    assert!(!permanent.ptr_eq(&shared_static));
 }
 
 struct NoClone;
@@ -108,13 +144,26 @@ fn empty_and_fixed_only_records() {
 struct Compact {
     #[datarc(len = u8)]
     bytes: [u8],
+    #[datarc(len = u8)]
+    text: str,
 }
 
 /// Checks that constructors reject lengths that exceed the configured type.
 #[test]
 fn construction_rejects_length_errors() {
-    assert!(Compact::try_new(vec![0; 256]).is_err());
-    assert!(std::panic::catch_unwind(|| Compact::new(vec![0; 256])).is_err());
+    assert!(Compact::try_new(vec![0; 256], "").is_err());
+    assert!(std::panic::catch_unwind(|| Compact::new(vec![0; 256], "")).is_err());
+    let text = "é".repeat(128);
+    assert!(matches!(
+        Compact::try_new([], &text),
+        Err(datarc::BuildError::LengthOverflow {
+            field: "text",
+            len: 256,
+            length_type: "u8"
+        })
+    ));
+    let owner = Compact::new([], "é".repeat(127));
+    assert_eq!(owner.text().len(), 254);
 }
 
 struct Counted {

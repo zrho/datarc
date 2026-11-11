@@ -123,6 +123,7 @@ fn count_mismatch_releases_the_partial_allocation() {
 #[datarc::record]
 struct Simple {
     id: u64,
+    text: str,
     bytes: [u8],
 }
 
@@ -130,11 +131,13 @@ struct Simple {
 #[test]
 fn record_construction_allocates_once_and_getters_do_not_allocate() {
     COUNT.with(|b| b.set(true));
-    let owner = Simple::new(7, [1, 2, 3]);
+    let owner = Simple::new(7, "héllo", [1, 2, 3]);
     let shared = owner.clone();
     let id = owner.id();
     let bytes = owner.bytes();
     assert!(std::ptr::eq(bytes, shared.bytes()));
+    assert_eq!(owner.text(), "héllo");
+    assert!(std::ptr::eq(owner.text(), shared.text()));
     drop(shared);
     COUNT.with(|b| b.set(false));
     assert_eq!(*id, 7);

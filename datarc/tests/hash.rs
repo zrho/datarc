@@ -57,6 +57,7 @@ fn hash_with<H: Hasher + Default>(value: &impl Hash) -> u64 {
 #[datarc(hash)]
 struct Record {
     id: u64,
+    text: str,
     #[datarc(len = u8)]
     values: [i32],
 }
@@ -66,25 +67,25 @@ struct Record {
 fn default_hasher_matches_fields_for_constructors() {
     let id = 42;
     let values = [3, -7, 11];
-    let expected = hash_with::<DefaultHasher>(&(id, values.as_slice()));
+    let expected = hash_with::<DefaultHasher>(&(id, "héllo", values.as_slice()));
     let owners = [
-        Record::new(id, values),
-        Record::try_new(id, values).unwrap(),
+        Record::new(id, "héllo", values),
+        Record::try_new(id, String::from("héllo"), values).unwrap(),
     ];
     for owner in owners {
         let cached: u64 = owner.cached_hash();
         assert_eq!(cached, expected);
         assert_eq!(
             cached,
-            hash_with::<DefaultHasher>(&(owner.id(), owner.values()))
+            hash_with::<DefaultHasher>(&(owner.id(), owner.text(), owner.values()))
         );
         assert_eq!(owner.clone().cached_hash(), expected);
         assert_eq!(std::mem::size_of_val(&owner), std::mem::size_of::<usize>());
     }
-    let empty = Record::new(0, []);
+    let empty = Record::new(0, "", []);
     assert_eq!(
         empty.cached_hash(),
-        hash_with::<DefaultHasher>(&(empty.id(), empty.values()))
+        hash_with::<DefaultHasher>(&(empty.id(), empty.text(), empty.values()))
     );
 }
 

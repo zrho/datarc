@@ -1,14 +1,15 @@
 # datarc
 
 `datarc` provides pointer-sized, atomically reference-counted owners for records
-and enums. Records store values and variable-length arrays in one allocation;
+and enums. Records store values, variable-length arrays, and strings in one allocation;
 enums store a variant tag in the pointer. Cloning an owner shares its data
 without copying it.
 
 ## Records
 
 Use `#[datarc::record]` on a named struct. Ordinary fields describe stored values,
-and `[T]` fields describe inline arrays. The macro creates a shared owner with
+`[T]` fields describe inline arrays, and `str` fields describe inline UTF-8 strings.
+The macro creates a shared owner with
 the same name. Fixed arrays `[T; N]` are single values, and explicit references
 are stored references:
 
@@ -16,18 +17,22 @@ are stored references:
 #[datarc::record]
 struct Record {
     id: u64,
+    text: str,
     values: [i32],
 }
 
-let record = Record::new(42, [10, 20, 30]);
+let record = Record::new(42, "Hello", [10, 20, 30]);
 let shared = record.clone();
 assert_eq!(*shared.id(), 42);
+assert_eq!(record.text(), "Hello");
 assert_eq!(record.values(), &[10, 20, 30]);
 assert!(record.ptr_eq(&shared));
 ```
 
 Constructors take owned values and exact-size iterables, such as arrays, vectors,
-or ranges. Use `try_new` for fallible construction. Getters borrow the stored
+or ranges. String inputs accept `impl AsRef<str>`, such as `&str` or `String`;
+their bytes are copied into the allocation. A `&str` field remains a stored
+reference, not an inline string. Use `try_new` for fallible construction. Getters borrow the stored
 values without allocating or changing the reference count. The last owner drops
 the contents and frees the allocation. Struct documentation and visibility apply
 to the owner; field documentation and visibility apply to the getters.
@@ -91,38 +96,40 @@ field types to implement `Eq`. Ordering remains field-based.
 ### Mutable fields
 
 Use `#[datarc(mut)]` on a field to generate a `name_mut(&mut self)` accessor.
-It returns `&mut T` for a value or `&mut [T]` for a sequence. A mutable slice
-permits element changes, but cannot change the sequence length. Combine options
+It returns `&mut T` for a value, `&mut [T]` for an array, or `&mut str` for an
+inline string. Mutable arrays and strings cannot change length. String mutation
+must preserve UTF-8. Combine options
 with `#[datarc(mut, len = u8)]` when needed.
 
 ```rust
 #[datarc::record]
 struct Buffer {
     #[datarc(mut)]
-    label: String,
+    label: str,
     #[datarc(mut, len = u8)]
     bytes: [u8],
 }
 
 let mut buffer = Buffer::new(String::from("data"), [1, 2, 3]);
 let shared = buffer.clone();
-buffer.label_mut().push_str("!");
+buffer.label_mut().make_ascii_uppercase();
 buffer.bytes_mut()[0] = 9;
-assert_eq!(buffer.label(), "data!");
+assert_eq!(buffer.label(), "DATA");
 assert_eq!(buffer.bytes(), &[9, 2, 3]);
 assert_eq!(shared.bytes(), &[1, 2, 3]);
 ```
 
-Mutable accessors require every stored value type and sequence element type to
-implement `Clone`. Unique, non-static records mutate without copying. Shared or
+Mutable accessors require every stored value type and array element type to
+implement `Clone`. Inline strings are copied as UTF-8 bytes.
+Unique, non-static records mutate without copying. Shared or
 static records first copy all fields into a new allocation; other owners keep
 the original data. Owner cloning still shares storage. Mutable fields cannot
 be combined with cached hashing (`#[datarc(hash)]`).
 
-### Array lengths
+### Array and string lengths
 
-Use `#[datarc(len = u8)]` on a `[T]` field to select a smaller stored length
-type. The array length must fit in that type.
+Use `#[datarc(len = u8)]` on a `[T]` or `str` field to select a smaller stored
+length type. The array element count or string byte length must fit in that type.
 
 ### Static storage
 

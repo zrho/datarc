@@ -37,12 +37,13 @@ struct Field {
     vis: syn::Visibility,
     attrs: Vec<syn::Attribute>,
     length: Option<Type>,
+    string: bool,
     mutable: bool,
     slot: Index,
 }
 
-fn field_options(field: &syn::Field) -> syn::Result<(Type, Option<Type>, bool)> {
-    // Parentheses and invisible groups do not change whether a type is a slice.
+fn field_options(field: &syn::Field) -> syn::Result<(Type, Option<Type>, bool, bool)> {
+    // Parentheses and invisible groups do not change the inline field kind.
     let mut declared_type = &field.ty;
     loop {
         declared_type = match declared_type {
@@ -55,6 +56,8 @@ fn field_options(field: &syn::Field) -> syn::Result<(Type, Option<Type>, bool)> 
         Type::Slice(ty) => Some(ty.elem.as_ref()),
         _ => None,
     };
+    let string =
+        matches!(declared_type, Type::Path(ty) if ty.qself.is_none() && ty.path.is_ident("str"));
     let mut length = None;
     let mut mutable = false;
     for attr in &field.attrs {
@@ -95,20 +98,25 @@ fn field_options(field: &syn::Field) -> syn::Result<(Type, Option<Type>, bool)> 
             Ok(())
         })?;
     }
-    let ty = slice_element.unwrap_or(&field.ty).clone();
-    if slice_element.is_some() {
+    let ty = if string {
+        syn::parse_quote!(u8)
+    } else {
+        slice_element.unwrap_or(&field.ty).clone()
+    };
+    if slice_element.is_some() || string {
         Ok((
             ty,
             Some(length.unwrap_or_else(|| syn::parse_quote!(usize))),
             mutable,
+            string,
         ))
     } else if length.is_some() {
         Err(syn::Error::new(
             field.span(),
-            "`len` requires a sequence field `[T]`",
+            "`len` requires a sequence field `[T]` or `str`",
         ))
     } else {
-        Ok((ty, None, mutable))
+        Ok((ty, None, mutable, false))
     }
 }
 
@@ -205,7 +213,7 @@ fn generate_owner(
                 "field name conflicts with a generated constructor",
             ));
         }
-        let (ty, length, mutable) = field_options(field)?;
+        let (ty, length, mutable, string) = field_options(field)?;
         let count = if length.is_some() {
             &mut many_count
         } else {
@@ -224,6 +232,7 @@ fn generate_owner(
                 .cloned()
                 .collect(),
             length,
+            string,
             mutable,
             slot,
         });
@@ -283,7 +292,9 @@ fn generate_owner(
         .iter()
         .map(|f| {
             let ty = &f.ty;
-            if f.length.is_some() {
+            if f.string {
+                quote!(impl ::std::convert::AsRef<str>)
+            } else if f.length.is_some() {
                 quote!(impl ::std::iter::IntoIterator<Item = #ty, IntoIter: ::std::iter::ExactSizeIterator>)
             } else {
                 quote!(#ty)
@@ -303,6 +314,13 @@ fn generate_owner(
         .map(|(_, i)| i)
         .collect();
     let length_names: Vec<_> = many.iter().map(|f| &f.ident).collect();
+    let prepare_tails = many.iter().zip(&many_inputs).map(|(field, input)| {
+        if field.string {
+            quote!(let #input = ::std::convert::AsRef::<str>::as_ref(&#input).bytes();)
+        } else {
+            quote!(let #input = ::std::iter::IntoIterator::into_iter(#input);)
+        }
+    });
 
     let storage_expr = quote!(<#storage #ty_generics>);
     let accessors = fields.iter().map(|f| {
@@ -334,10 +352,18 @@ fn generate_owner(
                     );
                 }
             });
+            let (view_type, view) = if f.string {
+                (
+                    quote!(str),
+                    quote!(::std::str::from_utf8_unchecked(__slice)),
+                )
+            } else {
+                (quote!([#ty]), quote!(__slice))
+            };
             quote! {
                 #(#attrs)*
                 #[inline]
-                #vis fn #ident(&self) -> &[#ty] {
+                #vis fn #ident(&self) -> &#view_type {
                     let __header = self.__datarc.get();
                     // Construction validated every size and alignment operation,
                     // and lengths are immutable. These operations cannot wrap
@@ -349,11 +375,14 @@ fn generate_owner(
                     let __offset = __offset.wrapping_add(__align - 1) & !(__align - 1);
                     // SAFETY: the stored length and offset describe initialized,
                     // aligned elements, kept alive by this borrowed strong owner.
+                    // String tails contain valid UTF-8 copied from str inputs;
+                    // safe mutable access preserves that invariant.
                     unsafe {
-                        ::std::slice::from_raw_parts(
+                        let __slice = ::std::slice::from_raw_parts(
                             self.__datarc.as_ptr().cast::<u8>().add(__offset).cast::<#ty>(),
                             __header.__lengths.#slot as usize,
-                        )
+                        );
+                        #view
                     }
                 }
             }
@@ -361,10 +390,12 @@ fn generate_owner(
     });
     let accessors = accessors.collect::<Vec<_>>();
     let make_mut = fresh_ident("__datarc_make_mut");
-    let clone_types: Vec<_> = fields.iter().map(|f| &f.ty).collect();
+    let clone_types: Vec<_> = fields.iter().filter(|f| !f.string).map(|f| &f.ty).collect();
     let clone_inputs = fields.iter().map(|f| {
         let ident = &f.ident;
-        if f.length.is_some() {
+        if f.string {
+            quote!(self.#ident())
+        } else if f.length.is_some() {
             quote!(self.#ident().iter().cloned())
         } else {
             quote!(::std::clone::Clone::clone(self.#ident()))
@@ -418,11 +449,19 @@ fn generate_owner(
                     );
                 }
             });
+            let (view_type, view) = if f.string {
+                (
+                    quote!(str),
+                    quote!(::std::str::from_utf8_unchecked_mut(__slice)),
+                )
+            } else {
+                (quote!([#ty]), quote!(__slice))
+            };
             quote! {
                 #[doc = #doc]
                 #(#deprecated)*
                 #[inline]
-                #vis fn #ident(&mut self) -> &mut [#ty]
+                #vis fn #ident(&mut self) -> &mut #view_type
                 where #(#clone_types: ::std::clone::Clone,)*
                 {
                     self.#make_mut();
@@ -435,11 +474,14 @@ fn generate_owner(
                     // SAFETY: construction validated the offset and immutable
                     // length. make_mut ensures exclusive, non-static storage;
                     // the slice borrow prevents access through this owner.
+                    // String bytes start as valid UTF-8 and are exposed only
+                    // as str, so safe mutation cannot invalidate them.
                     unsafe {
-                        ::std::slice::from_raw_parts_mut(
+                        let __slice = ::std::slice::from_raw_parts_mut(
                             self.__datarc.as_ptr().cast::<u8>().add(__offset).cast::<#ty>(),
                             __length,
-                        )
+                        );
+                        #view
                     }
                 }
             }
@@ -531,7 +573,7 @@ fn generate_owner(
                 ::std::ptr::eq(self.__datarc.as_ptr(), #other.__datarc.as_ptr())
             }
 
-            /// Construct a record from exact-size iterable inputs.
+            /// Construct a record from owned values, exact-size iterables, and strings.
             /// Panics if validation fails or an input iterator panics.
             #[allow(clippy::too_many_arguments)]
             #vis fn new(#(#names: #param_types),*) -> Self #hash_where {
@@ -541,8 +583,8 @@ fn generate_owner(
                 }
             }
 
-            /// Construct a record from exact-size iterable inputs, validating
-            /// reported lengths, allocation layout, and actual item counts.
+            /// Construct a record from owned values, exact-size iterables, and strings,
+            /// validating byte or element lengths, allocation layout, and actual item counts.
             /// Iterator panics propagate after cleaning up initialized values.
             /// Allocation failure follows the standard allocator's failure behavior.
             #[allow(clippy::too_many_arguments)]
@@ -595,7 +637,7 @@ fn generate_owner(
                 #(#names: #param_types),*
             ) -> ::std::result::Result<Self, #runtime::BuildError> #hash_where {
                 let (#(#inputs,)*) = (#(#names,)*);
-                #(let #many_inputs = ::std::iter::IntoIterator::into_iter(#many_inputs);)*
+                #(#prepare_tails)*
                 let __reported_lengths = [#(::std::iter::ExactSizeIterator::len(&#many_inputs),)*];
                 let __lengths: (#(#length_types,)*) = (#(
                     <#length_types as ::std::convert::TryFrom<usize>>::try_from(__reported_lengths[#many_indices])
